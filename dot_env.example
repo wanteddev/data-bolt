@@ -1,0 +1,32 @@
+# Data Bolt Environment Variables
+# Copy this file to .env and fill in your values:
+#   cp dot_env.example .env
+
+# =============================================================================
+# Required: Slack Credentials
+# Get these from https://api.slack.com/apps > Your App > Basic Information
+# =============================================================================
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_SIGNING_SECRET=your-signing-secret
+
+# =============================================================================
+# Optional: AWS Configuration (defaults are set in justfile)
+# =============================================================================
+# AWS_PROFILE=default
+# AWS_REGION=ap-northeast-2
+
+# =============================================================================
+# Custom Lambda Environment Variables
+# Add LAMBDA_* prefixed variables here, then run: just sync-env
+#
+# Example:
+#   LAMBDA_DATABASE_URL=postgresql://user:pass@host:5432/db
+#   LAMBDA_OPENAI_API_KEY=sk-...
+#   LAMBDA_FEATURE_FLAG=true
+#
+# After running `just sync-env`:
+#   - template.yaml will have new Parameters (DatabaseUrl, OpenaiApiKey, FeatureFlag)
+#   - Lambda functions will have environment variables (DATABASE_URL, OPENAI_API_KEY, FEATURE_FLAG)
+#   - deploy_stack.sh will pass these as CloudFormation parameters
+# =============================================================================
+# LAMBDA_YOUR_VAR_NAME=your-value

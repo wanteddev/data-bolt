@@ -1,0 +1,23 @@
+# Exclude version control and metadata
+.git
+.gitignore
+
+# Local environments & tooling
+.venv
+.env
+.env.*
+
+# Build and cache directories
+.aws-sam
+__pycache__
+.pytest_cache
+.mypy_cache
+
+# Logs and artifacts
+*.log
+out.json
+.DS_Store
+
+# IDE settings
+.vscode
+.idea

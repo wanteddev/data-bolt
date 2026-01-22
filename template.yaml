@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: A Slack bot on AWS Lambda with Litestar
+
+Parameters:
+  ImageUri:
+    Type: String
+    Default: 216989105690.dkr.ecr.ap-northeast-2.amazonaws.com/sandbox:latest
+    Description: Fully qualified ECR image reference used for both functions (tag or digest)
+  WebFunctionRoleArn:
+    Type: String
+    Default: arn:aws:iam::216989105690:role/sandbox-web-role
+    Description: ARN of the IAM execution role for the web Lambda function
+
+  SlackBgFunctionRoleArn:
+    Type: String
+    Default: arn:aws:iam::216989105690:role/sandbox-slack-bg-role
+    Description: ARN of the IAM execution role for the Slack background Lambda function
+  SlackBotToken:
+    Type: String
+    NoEcho: true
+    Description: Slack Bot User OAuth Token (xoxb-...)
+  SlackSigningSecret:
+    Type: String
+    NoEcho: true
+    Description: Slack Signing Secret for request verification
+
+Resources:
+  WebFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !Ref WebFunctionRoleArn
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      Architectures:
+        - arm64
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          AWS_LWA_PORT: "8080"
+          APP_MODE: "web"
+          SLACK_BOT_TOKEN: !Ref SlackBotToken
+          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+          SLACK_BG_FUNCTION_NAME: !Ref SlackBgFunction
+
+  WebFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref WebFunction
+      AuthType: NONE
+
+  WebFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  WebFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+
+  SlackBgFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !Ref SlackBgFunctionRoleArn
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      Architectures:
+        - arm64
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          AWS_LWA_PORT: "8080"
+          AWS_LWA_PASS_THROUGH_PATH: "/slack/background"
+          APP_MODE: "slack-bg"
+          SLACK_BOT_TOKEN: !Ref SlackBotToken
+
+Outputs:
+  WebFunctionUrl:
+    Description: Function URL for the Litestar web endpoint
+    Value: !GetAtt WebFunctionUrl.FunctionUrl
+
+  SlackBgFunctionName:
+    Description: Name of the Slack background function
+    Value: !Ref SlackBgFunction
+  SlackEventsUrl:
+    Description: URL for Slack Events/Commands webhook
+    Value: !Sub "${WebFunctionUrl}slack/events"

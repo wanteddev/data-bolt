@@ -1,0 +1,34 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+.env
+.env.*
+!.env.example
+
+# Build outputs
+.aws-sam/
+*.egg-info/
+.python-version
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs and temp files
+*.log
+out.json
+.last_image_tag
+.last_image_tag.json
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
