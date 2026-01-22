@@ -33,10 +33,17 @@ async def handle_slack_events(request: Request) -> Response:
     to the appropriate handlers via slack_bolt.
     """
 
-
     try:
         body = await request.body()
         headers = {k: v for k, v in request.headers.items()}
+
+        # Skip retries to avoid duplicate processing
+        if headers.get("X-Slack-Retry-Num"):
+            return Response(
+                content="ok",
+                status_code=200,
+                headers={"Content-Type": "text/plain"},
+            )
 
         bolt_request = BoltRequest(body=body.decode(), headers=headers)
         bolt_response = slack_app.dispatch(bolt_request)
