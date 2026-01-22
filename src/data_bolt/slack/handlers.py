@@ -107,12 +107,13 @@ def handle_long_task_command(ack: Ack, command: dict, say: Say, context: BoltCon
 
 
 @slack_app.event("app_mention")
-def handle_app_mention(event: dict, say: Say, context: BoltContext) -> None:
+def handle_app_mention(event: dict, say: Say, context: BoltContext, ack: Ack) -> None:
     """
     Handle when the bot is mentioned in a channel.
 
     For quick responses, reply directly. For complex tasks, use background processing.
     """
+    ack()
     user_id = event["user"]
     text = event.get("text", "")
     try:
@@ -135,12 +136,13 @@ def handle_app_mention(event: dict, say: Say, context: BoltContext) -> None:
 
 
 @slack_app.event("message")
-def handle_message(event: dict, context: BoltContext, say: Say) -> None:
+def handle_message(event: dict, context: BoltContext, say: Say, ack: Ack) -> None:
     """
     Handle direct messages to the bot.
 
     Only processes DMs (im channel type). Ignores bot messages to prevent loops.
     """
+    ack()
     # Ignore bot messages and message subtypes (edits, deletes, etc.)
     if event.get("bot_id") or event.get("subtype"):
         return
