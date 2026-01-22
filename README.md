@@ -235,58 +235,7 @@ SLACK_BOT_TOKEN=xoxb-... SLACK_SIGNING_SECRET=... just deploy
 
 ## Slack 핸들러 추가하기
 
-### 슬래시 커맨드
-
-`src/data_bolt/slack/handlers.py` 파일을 수정합니다:
-
-```python
-@slack_app.command("/mycommand")
-def handle_my_command(ack: Ack, command: dict, say: Say) -> None:
-    ack()  # 3초 이내에 응답
-    say(f"안녕하세요 <@{command['user_id']}>!")
-```
-
-### 이벤트 핸들러
-
-```python
-@slack_app.event("app_mention")
-def handle_mention(event: dict, say: Say) -> None:
-    say(f"멘션하셨네요: {event.get('text')}")
-```
-
-### 백그라운드 작업 (장시간 실행)
-
-3초를 초과하는 작업은 백그라운드 처리를 사용합니다:
-
-```python
-@slack_app.command("/slow-task")
-def handle_slow_task(ack: Ack, command: dict) -> None:
-    ack("처리 중... :hourglass:")  # 즉시 응답
-
-    # 백그라운드 Lambda로 오프로드
-    invoke_background(
-        task_type="my_task",
-        payload={
-            "user_id": command["user_id"],
-            "channel_id": command["channel_id"],
-            "response_url": command["response_url"],
-        },
-    )
-```
-
-그런 다음 `background.py`에 핸들러를 추가합니다:
-
-```python
-async def _handle_my_task(payload: dict) -> dict[str, Any]:
-    # 장시간 실행 로직 (최대 2분)
-    result = await some_slow_operation()
-
-    # response_url을 통해 응답 전송
-    async with httpx.AsyncClient() as client:
-        await client.post(payload["response_url"], json={"text": result})
-
-    return {"status": "ok"}
-```
+핸들러 예시와 백그라운드 패턴은 `docs/SLACK_GUIDE.md`에 정리했습니다.
 
 ## 라이선스
 
