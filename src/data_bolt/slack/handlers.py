@@ -117,18 +117,23 @@ def handle_app_mention(event: dict, say: Say, context: BoltContext, ack: Ack) ->
     user_id = event["user"]
     text = event.get("text", "")
     try:
+        try:
+            context.client.reactions_add(
+                channel=event["channel"],
+                name="loading",
+                timestamp=event["ts"],
+            )
+        except Exception as e:
+            logger.warning(f"Failed to add loading reaction: {e}")
         invoke_background(
             task_type="bigquery_sql",
             payload={
                 "user_id": user_id,
                 "channel_id": event["channel"],
                 "thread_ts": event.get("thread_ts") or event.get("ts"),
+                "message_ts": event.get("ts"),
                 "text": text,
             },
-        )
-        say(
-            "요청을 확인했어요. SQL 생성 중입니다... :hourglass_flowing_sand:",
-            thread_ts=event.get("thread_ts") or event.get("ts"),
         )
     except SlackBackgroundError as e:
         logger.error(f"Background task failed for mention from {user_id}: {e}")

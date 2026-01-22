@@ -242,27 +242,37 @@ async def handle_bigquery_sql_bg(payload: dict) -> dict[str, Any]:
     response_url = payload.get("response_url")
     channel_id = payload.get("channel_id")
     thread_ts = payload.get("thread_ts")
+    message_ts = payload.get("message_ts")
 
     logger.info("Background processing BigQuery SQL request")
 
     result = await build_bigquery_sql(payload)
     message = _format_bigquery_response(result)
 
-    if response_url:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                response_url,
-                json={
-                    "response_type": "in_channel",
-                    "text": message,
-                },
+    try:
+        if response_url:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    response_url,
+                    json={
+                        "response_type": "in_channel",
+                        "text": message,
+                    },
+                )
+        elif channel_id:
+            slack_client.chat_postMessage(
+                channel=channel_id,
+                text=message,
+                thread_ts=thread_ts,
             )
-    elif channel_id:
-        slack_client.chat_postMessage(
-            channel=channel_id,
-            text=message,
-            thread_ts=thread_ts,
-        )
+    finally:
+        if channel_id and message_ts:
+            try:
+                slack_client.reactions_remove(
+                    channel=channel_id, name="loading", timestamp=message_ts
+                )
+            except Exception as e:
+                logger.warning(f"Failed to remove loading reaction: {e}")
 
     if result.get("error"):
         return {"status": "error", "message": result.get("error")}
