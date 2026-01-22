@@ -1,6 +1,8 @@
 """Litestar application entrypoint."""
 
+import json
 import logging
+import time
 from typing import Any
 
 from slack_bolt.request import BoltRequest
@@ -9,6 +11,22 @@ from data_bolt.slack.app import slack_app
 from litestar import Litestar, Request, Response, get, post
 
 logger = logging.getLogger(__name__)
+
+_EVENT_DEDUPE_TTL_SECONDS = 300
+_event_dedupe_cache: dict[str, float] = {}
+
+
+def _is_duplicate_event(event_id: str) -> bool:
+    now = time.time()
+    expires_at = _event_dedupe_cache.get(event_id)
+    if expires_at and expires_at > now:
+        return True
+    _event_dedupe_cache[event_id] = now + _EVENT_DEDUPE_TTL_SECONDS
+    if len(_event_dedupe_cache) > 1000:
+        expired = [k for k, v in _event_dedupe_cache.items() if v <= now]
+        for key in expired:
+            _event_dedupe_cache.pop(key, None)
+    return False
 
 
 @get("/")
@@ -36,14 +54,28 @@ async def handle_slack_events(request: Request) -> Response:
     try:
         body = await request.body()
         headers = {k: v for k, v in request.headers.items()}
-
+        retry_num = next(
+            (v for k, v in headers.items() if k.lower() == "x-slack-retry-num"),
+            None,
+        )
         # Skip retries to avoid duplicate processing
-        if headers.get("X-Slack-Retry-Num"):
+        if retry_num:
             return Response(
                 content="ok",
                 status_code=200,
                 headers={"Content-Type": "text/plain"},
             )
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            event_id = payload.get("event_id")
+            if isinstance(event_id, str) and event_id and _is_duplicate_event(event_id):
+                return Response(
+                    content="ok",
+                    status_code=200,
+                    headers={"Content-Type": "text/plain"},
+                )
+        except Exception:
+            pass
 
         bolt_request = BoltRequest(body=body.decode(), headers=headers)
         bolt_response = slack_app.dispatch(bolt_request)
