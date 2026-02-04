@@ -7,7 +7,8 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
-from slack_bolt import Ack, BoltContext, Say
+from anyio import to_thread
+from slack_bolt.async_app import AsyncAck, AsyncBoltContext, AsyncSay
 
 from .app import slack_app
 
@@ -64,23 +65,25 @@ def invoke_background(task_type: str, payload: dict[str, Any]) -> None:
 
 
 @slack_app.command("/hello")
-def handle_hello_command(ack: Ack, command: dict[str, Any], say: Say) -> None:
+async def handle_hello_command(
+    ack: AsyncAck, command: dict[str, Any], say: AsyncSay
+) -> None:
     """
     Example slash command handler.
 
     For quick responses (< 3 seconds), respond directly.
     """
-    ack()
+    await ack()
     user_id = command["user_id"]
-    say(f"Hello <@{user_id}>! :wave:")
+    await say(f"Hello <@{user_id}>! :wave:")
 
 
 @slack_app.command("/longtask")
-def handle_long_task_command(
-    ack: Ack,
+async def handle_long_task_command(
+    ack: AsyncAck,
     command: dict[str, Any],
-    say: Say,
-    context: BoltContext,
+    say: AsyncSay,
+    context: AsyncBoltContext,
 ) -> None:
     """
     Example slash command that triggers background processing.
@@ -88,13 +91,14 @@ def handle_long_task_command(
     For long-running tasks, ack immediately and process in background Lambda.
     """
     # Immediately acknowledge to avoid 3-second timeout
-    ack("Processing your request... :hourglass_flowing_sand:")
+    await ack("Processing your request... :hourglass_flowing_sand:")
 
     try:
         # Invoke background Lambda for actual processing
-        invoke_background(
-            task_type="slash_command",
-            payload={
+        await to_thread.run_sync(
+            invoke_background,
+            "slash_command",
+            {
                 "command": "/longtask",
                 "user_id": command["user_id"],
                 "channel_id": command["channel_id"],
@@ -104,7 +108,9 @@ def handle_long_task_command(
         )
     except SlackBackgroundError as e:
         logger.error(f"Background task failed for /longtask: {e}")
-        say(":x: Sorry, there was an error processing your request. Please try again later.")
+        await say(
+            ":x: Sorry, there was an error processing your request. Please try again later."
+        )
 
 
 # =============================================================================
@@ -113,32 +119,31 @@ def handle_long_task_command(
 
 
 @slack_app.event("app_mention")
-def handle_app_mention(
+async def handle_app_mention(
     event: dict[str, Any],
-    say: Say,
-    context: BoltContext,
-    ack: Ack,
+    say: AsyncSay,
+    context: AsyncBoltContext,
+    ack: AsyncAck,
 ) -> None:
     """
     Handle when the bot is mentioned in a channel.
 
     For quick responses, reply directly. For complex tasks, use background processing.
     """
-    ack()
+    await ack()
     user_id = event["user"]
     text = event.get("text", "")
     try:
         try:
-            context.client.reactions_add(
-                channel=event["channel"],
-                name="loading",
-                timestamp=event["ts"],
+            await context.client.reactions_add(
+                channel=event["channel"], name="loading", timestamp=event["ts"]
             )
         except Exception as e:
             logger.warning(f"Failed to add loading reaction: {e}")
-        invoke_background(
-            task_type="bigquery_sql",
-            payload={
+        await to_thread.run_sync(
+            invoke_background,
+            "bigquery_sql",
+            {
                 "user_id": user_id,
                 "channel_id": event["channel"],
                 "thread_ts": event.get("thread_ts") or event.get("ts"),
@@ -148,22 +153,22 @@ def handle_app_mention(
         )
     except SlackBackgroundError as e:
         logger.error(f"Background task failed for mention from {user_id}: {e}")
-        say(":x: 요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
+        await say(":x: 요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
 
 @slack_app.event("message")
-def handle_message(
+async def handle_message(
     event: dict[str, Any],
-    context: BoltContext,
-    say: Say,
-    ack: Ack,
+    context: AsyncBoltContext,
+    say: AsyncSay,
+    ack: AsyncAck,
 ) -> None:
     """
     Handle direct messages to the bot.
 
     Only processes DMs (im channel type). Ignores bot messages to prevent loops.
     """
-    ack()
+    await ack()
     # Ignore bot messages and message subtypes (edits, deletes, etc.)
     if event.get("bot_id") or event.get("subtype"):
         return
@@ -178,9 +183,10 @@ def handle_message(
 
     try:
         # Example: Trigger background processing for DMs
-        invoke_background(
-            task_type="dm_message",
-            payload={
+        await to_thread.run_sync(
+            invoke_background,
+            "dm_message",
+            {
                 "user_id": user_id,
                 "channel_id": event["channel"],
                 "text": text,
@@ -188,8 +194,8 @@ def handle_message(
             },
         )
         # Quick acknowledgment
-        say("Got it! Processing your message... :robot_face:")
+        await say("Got it! Processing your message... :robot_face:")
 
     except SlackBackgroundError as e:
         logger.error(f"Background task failed for DM from {user_id}: {e}")
-        say(":x: Sorry, I couldn't process your message right now. Please try again later.")
+        await say(":x: Sorry, I couldn't process your message right now. Please try again later.")

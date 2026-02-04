@@ -4,13 +4,14 @@ import logging
 import os
 from typing import Any
 
-from slack_bolt import App, BoltResponse
+from slack_bolt import BoltResponse
+from slack_bolt.async_app import AsyncApp
 from slack_bolt.error import BoltUnhandledRequestError
 
 logger = logging.getLogger(__name__)
 
 
-def custom_error_handler(
+async def custom_error_handler(
     error: Exception,
     body: dict[str, Any],
     logger: logging.Logger,
@@ -35,7 +36,7 @@ def custom_error_handler(
     )
 
 
-slack_app = App(
+slack_app = AsyncApp(
     token=os.environ.get("SLACK_BOT_TOKEN"),
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     process_before_response=True,  # Required for Lambda - must ack before timeout

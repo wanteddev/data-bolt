@@ -3,8 +3,10 @@
 import logging
 import os
 import traceback
+from functools import partial
 from typing import Any
 
+from anyio import to_thread
 import httpx
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -12,6 +14,10 @@ from slack_sdk.errors import SlackApiError
 logger = logging.getLogger(__name__)
 
 slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
+
+
+async def _run_slack_call(func, **kwargs):
+    return await to_thread.run_sync(partial(func, **kwargs))
 
 
 async def send_error_response(
@@ -36,7 +42,8 @@ async def send_error_response(
                     },
                 )
         elif channel_id:
-            slack_client.chat_postMessage(
+            await _run_slack_call(
+                slack_client.chat_postMessage,
                 channel=channel_id,
                 text=f":x: {error_message}",
             )
@@ -170,7 +177,8 @@ async def _handle_dm_message_bg(payload: dict[str, Any]) -> dict[str, Any]:
 
     # Send response via Slack Web API
     try:
-        slack_client.chat_postMessage(
+        await _run_slack_call(
+            slack_client.chat_postMessage,
             channel=channel_id,
             text=result,
             thread_ts=thread_ts,  # Reply in thread
@@ -260,7 +268,8 @@ async def handle_bigquery_sql_bg(payload: dict) -> dict[str, Any]:
                     },
                 )
         elif channel_id:
-            slack_client.chat_postMessage(
+            await _run_slack_call(
+                slack_client.chat_postMessage,
                 channel=channel_id,
                 text=message,
                 thread_ts=thread_ts,
@@ -268,8 +277,11 @@ async def handle_bigquery_sql_bg(payload: dict) -> dict[str, Any]:
     finally:
         if channel_id and message_ts:
             try:
-                slack_client.reactions_remove(
-                    channel=channel_id, name="loading", timestamp=message_ts
+                await _run_slack_call(
+                    slack_client.reactions_remove,
+                    channel=channel_id,
+                    name="loading",
+                    timestamp=message_ts,
                 )
             except Exception as e:
                 logger.warning(f"Failed to remove loading reaction: {e}")

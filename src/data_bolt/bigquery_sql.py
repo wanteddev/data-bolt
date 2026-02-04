@@ -9,6 +9,7 @@ import re
 import time
 from typing import Any, Optional
 
+from anyio import to_thread
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -267,17 +268,17 @@ class _SSMParameterLoader:
 _ssm_loader = _SSMParameterLoader()
 
 
-def _get_laas_api_key() -> str:
+async def _get_laas_api_key() -> str:
     env_key = os.getenv("LAAS_API_KEY")
     if env_key:
         return env_key
     param_key = os.getenv("LAAS_API_KEY_SSM_PARAM", LAAS_API_KEY_SSM_PARAM)
-    return _ssm_loader.get_parameter(param_key, with_decryption=True)
+    return await to_thread.run_sync(_ssm_loader.get_parameter, param_key, True)
 
 
 async def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     base_url = os.getenv("LAAS_BASE_URL", LAAS_DEFAULT_BASE_URL).rstrip("/")
-    api_key = _get_laas_api_key()
+    api_key = await _get_laas_api_key()
 
     url = f"{base_url}{path}"
     headers = {

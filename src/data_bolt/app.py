@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from litestar import Litestar, Request, Response, get, post
-from slack_bolt.request import BoltRequest
+from slack_bolt.async_app import AsyncBoltRequest
 
 from .slack.app import slack_app
 
@@ -90,8 +90,8 @@ async def handle_slack_events(request: Request[Any, Any, Any]) -> Response[str]:
         except Exception:
             pass
 
-        bolt_request = BoltRequest(body=body.decode(), headers=headers)
-        bolt_response = slack_app.dispatch(bolt_request)
+        bolt_request = AsyncBoltRequest(body=body.decode(), headers=headers)
+        bolt_response = await slack_app.async_dispatch(bolt_request)
 
         # Convert bolt headers to simple dict (bolt uses dict[str, list[str]])
         response_headers: dict[str, str] = {}
