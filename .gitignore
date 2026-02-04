@@ -29,6 +29,9 @@ out.json
 .last_image_tag.json
 .DS_Store
 
+# Local secrets
+slack_token
+
 # IDE
 .vscode/
 .idea/
