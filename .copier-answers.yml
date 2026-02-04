@@ -1,16 +1,17 @@
 # Changes here will be overwritten by Copier
-_commit: 97460aa9f57dab007321db3ef49c819fd6ad8ed7
+_commit: 20bc3ee
 _src_path: git@github.com:wanteddev/slack-bot-lambda-template.git
+author_name: june
+aws_account_id: '216989105690'
+aws_region: ap-northeast-2
+include_scheduler: false
+lambda_memory_slack_bg: 512
+lambda_memory_web: 512
+lambda_timeout_slack_bg: 120
+lambda_timeout_web: 15
+project_description: A Slack bot on AWS Lambda with Litestar
 project_name: Data Bolt
 project_slug: data_bolt
+python_version: '3.13'
 stack_name: sandbox
-project_description: A Slack bot on AWS Lambda with Litestar
-author_name: june
-include_scheduler: false
-aws_account_id: "216989105690"
-aws_region: ap-northeast-2
-lambda_memory_web: 512
-lambda_timeout_web: 15
-lambda_memory_slack_bg: 512
-lambda_timeout_slack_bg: 120
-python_version: "3.13"
+
