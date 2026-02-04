@@ -35,7 +35,7 @@ Resources:
       Architectures:
         - arm64
       Timeout: 15
-      MemorySize: 512
+      MemorySize: 1024
       Environment:
         Variables:
           AWS_LWA_PORT: "8080"
@@ -77,7 +77,7 @@ Resources:
       Architectures:
         - arm64
       Timeout: 120
-      MemorySize: 512
+      MemorySize: 1024
       Environment:
         Variables:
           AWS_LWA_PORT: "8080"

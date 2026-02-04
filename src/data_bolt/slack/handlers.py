@@ -3,12 +3,13 @@
 import json
 import logging
 import os
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
 from slack_bolt import Ack, BoltContext, Say
 
-from data_bolt.slack.app import slack_app
+from .app import slack_app
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ class SlackBackgroundError(Exception):
     pass
 
 
-def invoke_background(task_type: str, payload: dict) -> None:
+def invoke_background(task_type: str, payload: dict[str, Any]) -> None:
     """
     Invoke background Lambda for long-running tasks.
 
@@ -63,7 +64,7 @@ def invoke_background(task_type: str, payload: dict) -> None:
 
 
 @slack_app.command("/hello")
-def handle_hello_command(ack: Ack, command: dict, say: Say) -> None:
+def handle_hello_command(ack: Ack, command: dict[str, Any], say: Say) -> None:
     """
     Example slash command handler.
 
@@ -75,7 +76,12 @@ def handle_hello_command(ack: Ack, command: dict, say: Say) -> None:
 
 
 @slack_app.command("/longtask")
-def handle_long_task_command(ack: Ack, command: dict, say: Say, context: BoltContext) -> None:
+def handle_long_task_command(
+    ack: Ack,
+    command: dict[str, Any],
+    say: Say,
+    context: BoltContext,
+) -> None:
     """
     Example slash command that triggers background processing.
 
@@ -107,7 +113,12 @@ def handle_long_task_command(ack: Ack, command: dict, say: Say, context: BoltCon
 
 
 @slack_app.event("app_mention")
-def handle_app_mention(event: dict, say: Say, context: BoltContext, ack: Ack) -> None:
+def handle_app_mention(
+    event: dict[str, Any],
+    say: Say,
+    context: BoltContext,
+    ack: Ack,
+) -> None:
     """
     Handle when the bot is mentioned in a channel.
 
@@ -141,7 +152,12 @@ def handle_app_mention(event: dict, say: Say, context: BoltContext, ack: Ack) ->
 
 
 @slack_app.event("message")
-def handle_message(event: dict, context: BoltContext, say: Say, ack: Ack) -> None:
+def handle_message(
+    event: dict[str, Any],
+    context: BoltContext,
+    say: Say,
+    ack: Ack,
+) -> None:
     """
     Handle direct messages to the bot.
 

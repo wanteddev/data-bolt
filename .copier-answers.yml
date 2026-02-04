@@ -1,12 +1,12 @@
 # Changes here will be overwritten by Copier
-_commit: 20bc3ee
+_commit: d260bad
 _src_path: git@github.com:wanteddev/slack-bot-lambda-template.git
 author_name: june
 aws_account_id: '216989105690'
 aws_region: ap-northeast-2
 include_scheduler: false
-lambda_memory_slack_bg: 512
-lambda_memory_web: 512
+lambda_memory_slack_bg: 1024
+lambda_memory_web: 1024
 lambda_timeout_slack_bg: 120
 lambda_timeout_web: 15
 project_description: A Slack bot on AWS Lambda with Litestar

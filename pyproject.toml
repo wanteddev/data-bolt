@@ -29,12 +29,13 @@ module-root = "src"
 
 [dependency-groups]
 dev = [
-    "mypy>=1.19.0",
+    "boto3-stubs[essential]",
+    "mypy>=1.19.1",
     "pre-commit>=4.3.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
-    "ruff>=0.14.7",
+    "ruff>=0.15.0",
 ]
 
 [tool.pytest.ini_options]
@@ -84,7 +85,7 @@ target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+extend-select = ["B", "I", "RUF", "UP"]
 ignore = ["E203"]
 
 [tool.ruff.format]
@@ -95,5 +96,8 @@ quote-style = "double"
 python_version = "3.13"
 strict = true
 warn_unused_configs = true
+warn_unreachable = true
 warn_redundant_casts = true
 warn_unused_ignores = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+files = ["src"]

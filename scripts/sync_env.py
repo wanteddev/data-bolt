@@ -95,9 +95,12 @@ def update_template_yaml(template_path: Path, lambda_vars: dict[str, str]) -> li
 
         # Add environment variable to all Lambda functions
         # Pattern: find Environment:\n        Variables: blocks and add the new var
-        def add_env_var(match: re.Match[str]) -> str:
+        def add_env_var(
+            match: re.Match[str],
+            env_var_name: str = env_var_name,
+            param_name: str = param_name,
+        ) -> str:
             block = match.group(0)
-            indent = match.group(1)
             # Check if this env var already exists in this block
             if f"{env_var_name}:" in block:
                 return block
@@ -139,16 +142,16 @@ def update_deploy_script(script_path: Path, lambda_vars: dict[str, str]) -> list
     new_lines: list[str] = []
     last_param_override_idx = -1
 
-    for i, line in enumerate(lines):
+    for _i, line in enumerate(lines):
         new_lines.append(line)
         if "PARAM_OVERRIDES=" in line and "&&" in line:
             last_param_override_idx = len(new_lines) - 1
 
     if last_param_override_idx == -1:
         # Find the initial PARAM_OVERRIDES= line
-        for i, line in enumerate(new_lines):
+        for index, line in enumerate(new_lines):
             if line.strip().startswith("PARAM_OVERRIDES=") and "&&" not in line:
-                last_param_override_idx = i
+                last_param_override_idx = index
                 break
 
     if last_param_override_idx == -1:

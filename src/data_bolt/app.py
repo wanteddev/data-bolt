@@ -3,12 +3,13 @@
 import json
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any
 
-from slack_bolt.request import BoltRequest
-from data_bolt.slack.app import slack_app
-
 from litestar import Litestar, Request, Response, get, post
+from slack_bolt.request import BoltRequest
+
+from .slack.app import slack_app
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,14 @@ def _is_duplicate_event(event_id: str) -> bool:
     return False
 
 
+def _first_header_value(value: str | Sequence[str]) -> str | None:
+    if isinstance(value, str):
+        return value
+    for item in value:
+        return item
+    return None
+
+
 @get("/")
 async def health() -> dict[str, str]:
     """Basic health check endpoint."""
@@ -43,7 +52,7 @@ async def healthz() -> dict[str, str]:
 
 
 @post("/slack/events")
-async def handle_slack_events(request: Request) -> Response:
+async def handle_slack_events(request: Request[Any, Any, Any]) -> Response[str]:
     """
     Handle Slack events (slash commands, events API, interactions).
 
@@ -53,9 +62,13 @@ async def handle_slack_events(request: Request) -> Response:
 
     try:
         body = await request.body()
-        headers = {k: v for k, v in request.headers.items()}
+        headers: dict[str, str | Sequence[str]] = {k: v for k, v in request.headers.items()}
         retry_num = next(
-            (v for k, v in headers.items() if k.lower() == "x-slack-retry-num"),
+            (
+                _first_header_value(v)
+                for k, v in headers.items()
+                if k.lower() == "x-slack-retry-num"
+            ),
             None,
         )
         # Skip retries to avoid duplicate processing
@@ -127,7 +140,6 @@ app = Litestar(
     route_handlers=[
         health,
         healthz,
-
         handle_slack_events,
         handle_slack_background,
     ],

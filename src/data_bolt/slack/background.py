@@ -89,7 +89,7 @@ async def process_background_task(event: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": error_msg}
 
     except httpx.HTTPError as e:
-        error_msg = f"HTTP error: {str(e)}"
+        error_msg = f"HTTP error: {e}"
         logger.error(f"Background task {task_type} failed: {error_msg}")
 
         await send_error_response(
@@ -100,7 +100,7 @@ async def process_background_task(event: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": error_msg}
 
     except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
+        error_msg = f"Unexpected error: {e}"
         logger.error(f"Background task {task_type} failed: {error_msg}\n{traceback.format_exc()}")
 
         await send_error_response(
@@ -111,7 +111,7 @@ async def process_background_task(event: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": error_msg}
 
 
-async def _handle_slash_command_bg(payload: dict) -> dict[str, Any]:
+async def _handle_slash_command_bg(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Background handler for slash commands.
 
@@ -147,7 +147,7 @@ async def _handle_slash_command_bg(payload: dict) -> dict[str, Any]:
     return {"status": "ok", "result": result}
 
 
-async def _handle_dm_message_bg(payload: dict) -> dict[str, Any]:
+async def _handle_dm_message_bg(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Background handler for direct messages.
 

@@ -2,6 +2,7 @@
 
 import logging
 import os
+from typing import Any
 
 from slack_bolt import App, BoltResponse
 from slack_bolt.error import BoltUnhandledRequestError
@@ -9,7 +10,11 @@ from slack_bolt.error import BoltUnhandledRequestError
 logger = logging.getLogger(__name__)
 
 
-def custom_error_handler(error: Exception, body: dict, logger: logging.Logger) -> BoltResponse:
+def custom_error_handler(
+    error: Exception,
+    body: dict[str, Any],
+    logger: logging.Logger,
+) -> BoltResponse:
     """
     Global error handler for Slack Bolt app.
 
@@ -40,4 +45,4 @@ slack_app = App(
 slack_app.error(custom_error_handler)
 
 # Import handlers AFTER slack_app is defined to avoid circular import
-from data_bolt.slack import handlers  # noqa: F401, E402 - registers handlers
+from . import handlers  # noqa: F401, E402 - registers handlers
