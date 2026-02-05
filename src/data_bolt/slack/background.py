@@ -3,11 +3,12 @@
 import logging
 import os
 import traceback
+from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
-from anyio import to_thread
 import httpx
+from anyio import to_thread
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -16,8 +17,12 @@ logger = logging.getLogger(__name__)
 slack_client = WebClient(token=os.environ.get("SLACK_BOT_TOKEN"))
 
 
-async def _run_slack_call(func, **kwargs):
-    return await to_thread.run_sync(partial(func, **kwargs))
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+async def _run_slack_call(func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    return await to_thread.run_sync(partial(func, *args, **kwargs))
 
 
 async def send_error_response(
@@ -132,8 +137,6 @@ def _extract_sql_from_result(result: dict[str, Any]) -> str | None:
 
 
 def _format_validation_summary(validation: dict[str, Any]) -> str | None:
-    if not isinstance(validation, dict):
-        return None
     if validation.get("success"):
         if validation.get("refined"):
             return ":white_check_mark: Dry-run passed after refine."
@@ -162,7 +165,7 @@ def _format_bigquery_response(result: dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
-async def handle_bigquery_sql_bg(payload: dict) -> dict[str, Any]:
+async def handle_bigquery_sql_bg(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Background handler for BigQuery SQL generation.
 

@@ -1,6 +1,6 @@
 """Runtime-agnostic task implementations."""
 
-from data_bolt.tasks.bigquery_sql import build_bigquery_sql  # noqa: F401
+from data_bolt.tasks.bigquery_sql import build_bigquery_sql
 
 __all__ = [
     "build_bigquery_sql",

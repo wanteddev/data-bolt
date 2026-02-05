@@ -50,7 +50,6 @@ async def healthz() -> dict[str, str]:
     return {"status": "healthy"}
 
 
-
 @post("/slack/events")
 async def handle_slack_events(request: Request[Any, Any, Any]) -> Response[str]:
     """

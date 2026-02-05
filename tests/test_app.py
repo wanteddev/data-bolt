@@ -2,7 +2,7 @@ from litestar.testing import TestClient
 from slack_bolt import BoltResponse
 from slack_bolt.async_app import AsyncBoltRequest
 
-from data_bolt.app import app  # noqa: E402
+from data_bolt.app import app
 
 
 def test_health_endpoints() -> None:

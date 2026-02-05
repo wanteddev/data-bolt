@@ -5,9 +5,7 @@ from data_bolt.slack import background
 
 @pytest.mark.asyncio
 async def test_process_background_task_unknown_returns_error() -> None:
-    result = await background.process_background_task(
-        {"task_type": "unknown_task", "payload": {}}
-    )
+    result = await background.process_background_task({"task_type": "unknown_task", "payload": {}})
 
     assert result["status"] == "error"
     assert "Unknown task type" in result["message"]

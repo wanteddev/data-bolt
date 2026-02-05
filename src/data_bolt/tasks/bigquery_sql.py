@@ -7,16 +7,19 @@ import logging
 import os
 import re
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from mypy_boto3_ssm import SSMClient
+
+JsonValue = dict[str, Any] | list[Any]
 
 logger = logging.getLogger(__name__)
 
 LAAS_DEFAULT_BASE_URL = "https://api-laas.wanted.co.kr"
-LAAS_EMPTY_PRESET_HASH = (
-    "2e1cfa82b035c26cbbbdae632cea070514eb8b773f616aaeaf668e2f0be8f10d"
-)
+LAAS_EMPTY_PRESET_HASH = "2e1cfa82b035c26cbbbdae632cea070514eb8b773f616aaeaf668e2f0be8f10d"
 LAAS_API_KEY_SSM_PARAM = "/DATA/PIPELINE/API_KEY/OPENAI"
 LAAS_RAG_SCHEMA_COLLECTION = "RAG_DATA_CATALOG"
 LAAS_RAG_GLOSSARY_COLLECTION = "RAG_GLOSSARY"
@@ -33,9 +36,7 @@ def extract_sql_blocks(text: str, min_length: int = 20) -> list[str]:
     for match in fenced_pattern.finditer(text):
         block = match.group(1).strip()
         if len(block) >= min_length:
-            blocks.extend(
-                [b.strip() for b in block.split(";") if len(b.strip()) >= min_length]
-            )
+            blocks.extend([b.strip() for b in block.split(";") if len(b.strip()) >= min_length])
 
     if blocks:
         return blocks
@@ -50,7 +51,7 @@ def extract_sql_blocks(text: str, min_length: int = 20) -> list[str]:
     return blocks
 
 
-def _ensure_trailing_semicolon(sql: Optional[str]) -> Optional[str]:
+def _ensure_trailing_semicolon(sql: str | None) -> str | None:
     if sql is None:
         return None
     s = sql.rstrip()
@@ -83,9 +84,7 @@ def _classify_instruction_type(question: str, history: list[dict[str, Any]] | No
         ]
     )
     has_sql = _looks_like_sql(question) or any(
-        _looks_like_sql(m.get("content", ""))
-        for m in (history or [])
-        if m.get("role") == "user"
+        _looks_like_sql(m.get("content", "")) for m in (history or []) if m.get("role") == "user"
     )
     if wants_analysis and has_sql:
         return "bigquery_sql_analysis"
@@ -111,7 +110,10 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, A
         resp = client.post(url, json=payload)
         resp.raise_for_status()
         try:
-            return resp.json()
+            data = resp.json()
+            if isinstance(data, dict):
+                return data
+            return {"content": data}
         except Exception:
             return {"content": resp.text}
 
@@ -184,9 +186,7 @@ def _build_instruction_block(instruction_type: str) -> str:
     ).strip()
 
 
-def _clip_history(
-    history: list[dict[str, Any]] | None, clip_limit: int
-) -> list[dict[str, Any]]:
+def _clip_history(history: list[dict[str, Any]] | None, clip_limit: int) -> list[dict[str, Any]]:
     if not history:
         return []
     normalized: list[dict[str, Any]] = []
@@ -240,7 +240,7 @@ class _SSMParameterLoader:
     def __init__(self, cache_ttl: int = 300):
         self._cache: dict[str, tuple[float, str]] = {}
         self._cache_ttl = cache_ttl
-        self._client = None
+        self._client: SSMClient | None = None
 
     def get_parameter(self, key: str, with_decryption: bool = False) -> str:
         cache_key = f"{key}:{with_decryption}"
@@ -256,10 +256,8 @@ class _SSMParameterLoader:
 
             self._client = boto3.client("ssm")
 
-        response = self._client.get_parameter(
-            Name=key, WithDecryption=with_decryption
-        )
-        value = response["Parameter"]["Value"]
+        response = self._client.get_parameter(Name=key, WithDecryption=with_decryption)
+        value = str(response["Parameter"]["Value"])
         self._cache[cache_key] = (now + self._cache_ttl, value)
         return value
 
@@ -275,7 +273,7 @@ def _get_laas_api_key() -> str:
     return _ssm_loader.get_parameter(param_key, True)
 
 
-def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> JsonValue:
     base_url = os.getenv("LAAS_BASE_URL", LAAS_DEFAULT_BASE_URL).rstrip("/")
     api_key = _get_laas_api_key()
 
@@ -288,7 +286,10 @@ def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, 
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        if isinstance(data, (dict, list)):
+            return data
+        return {"content": data}
 
 
 def _vector_search(
@@ -307,9 +308,7 @@ def _vector_search(
         "min_score": min_score,
     }
     try:
-        resp = _laas_post(
-            f"/api/document/{collection}/similar/text", payload, timeout=30.0
-        )
+        resp = _laas_post(f"/api/document/{collection}/similar/text", payload, timeout=30.0)
         return resp if isinstance(resp, list) else []
     except Exception as e:
         logger.warning(
@@ -332,12 +331,8 @@ def _join_doc_texts(docs: list[dict[str, Any]]) -> str:
 
 
 def _collect_rag_context(question: str) -> dict[str, str]:
-    schema_collection = os.getenv(
-        "LAAS_RAG_SCHEMA_COLLECTION", LAAS_RAG_SCHEMA_COLLECTION
-    )
-    glossary_collection = os.getenv(
-        "LAAS_RAG_GLOSSARY_COLLECTION", LAAS_RAG_GLOSSARY_COLLECTION
-    )
+    schema_collection = os.getenv("LAAS_RAG_SCHEMA_COLLECTION", LAAS_RAG_SCHEMA_COLLECTION)
+    glossary_collection = os.getenv("LAAS_RAG_GLOSSARY_COLLECTION", LAAS_RAG_GLOSSARY_COLLECTION)
     schema_limit = int(os.getenv("LAAS_RAG_SCHEMA_LIMIT", "64"))
     glossary_limit = int(os.getenv("LAAS_RAG_GLOSSARY_LIMIT", "5"))
     schema_min_score = float(os.getenv("LAAS_RAG_SCHEMA_MIN_SCORE", "0.5"))
@@ -380,7 +375,8 @@ def generate_bigquery_response(
         instruction_type=instruction_type,
     )
     payload = {"hash": LAAS_EMPTY_PRESET_HASH, "messages": messages}
-    return _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
+    resp = _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
+    return resp if isinstance(resp, dict) else {"choices": []}
 
 
 def refine_bigquery_sql(
@@ -482,7 +478,7 @@ def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
         return False, {"error": str(e)}
 
 
-def _extract_sql_from_response(resp: dict[str, Any]) -> tuple[str | None, str | None]:
+def _extract_sql_from_response(resp: JsonValue) -> tuple[str | None, str | None]:
     sql = resp.get("sql") if isinstance(resp, dict) else None
     explanation = resp.get("explanation") if isinstance(resp, dict) else None
     if isinstance(sql, str) and sql.strip():
@@ -506,7 +502,8 @@ def _extract_sql_from_response(resp: dict[str, Any]) -> tuple[str | None, str | 
 
 def _parse_json_response(content: str) -> dict[str, Any]:
     try:
-        return json.loads(content)
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
 
