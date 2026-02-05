@@ -44,19 +44,6 @@ async def test_handle_message_bot_ignored() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_long_task_command_says_result() -> None:
-    ack = AsyncMock()
-    say = AsyncMock()
-    command = {"user_id": "U1", "text": "hello"}
-
-    await handlers.handle_long_task_command(ack=ack, command=command, say=say)
-
-    ack.assert_awaited_once_with("Processing your request... :hourglass_flowing_sand:")
-    say.assert_awaited_once()
-    assert "Processed 'hello' successfully!" in say.call_args.args[0]
-
-
-@pytest.mark.asyncio
 async def test_handle_app_mention_triggers_background(monkeypatch) -> None:
     ack = AsyncMock()
     say = AsyncMock()

@@ -6,8 +6,8 @@ import os
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
 from anyio import to_thread
+from botocore.exceptions import ClientError
 from slack_bolt.async_app import AsyncAck, AsyncBoltContext, AsyncSay
 
 from .app import slack_app
@@ -65,9 +65,7 @@ def invoke_background(task_type: str, payload: dict[str, Any]) -> None:
 
 
 @slack_app.command("/hello")
-async def handle_hello_command(
-    ack: AsyncAck, command: dict[str, Any], say: AsyncSay
-) -> None:
+async def handle_hello_command(ack: AsyncAck, command: dict[str, Any], say: AsyncSay) -> None:
     """
     Example slash command handler.
 
@@ -76,29 +74,6 @@ async def handle_hello_command(
     await ack()
     user_id = command["user_id"]
     await say(f"Hello <@{user_id}>! :wave:")
-
-
-@slack_app.command("/longtask")
-async def handle_long_task_command(
-    ack: AsyncAck,
-    command: dict[str, Any],
-    say: AsyncSay,
-) -> None:
-    """
-    Example slash command handler.
-
-    For quick processing, handle directly after ack.
-    """
-    # Immediately acknowledge to avoid 3-second timeout
-    await ack("Processing your request... :hourglass_flowing_sand:")
-
-    # ==========================================================================
-    # YOUR LONG-RUNNING LOGIC HERE
-    # Keep it fast; move to SlackBgFunction if it can exceed ~3 seconds.
-    # ==========================================================================
-    text = command.get("text", "")
-    result = f"Processed '{text}' successfully!"
-    await say(f":white_check_mark: {result}")
 
 
 # =============================================================================

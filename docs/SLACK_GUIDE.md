@@ -112,7 +112,7 @@ def handle_hello(ack: Ack, command: dict, say: Say) -> None:
 3초를 초과하는 작업은 백그라운드로 처리합니다:
 
 ```python
-@slack_app.command("/longtask")
+@slack_app.command("/mycommand")
 def handle_long_task(ack: Ack, command: dict) -> None:
     # 즉시 임시 응답
     ack(":hourglass_flowing_sand: 처리 중입니다...")
@@ -121,7 +121,7 @@ def handle_long_task(ack: Ack, command: dict) -> None:
     invoke_background(
         task_type="slash_command",
         payload={
-            "command": "/longtask",
+            "command": "/mycommand",
             "user_id": command["user_id"],
             "channel_id": command["channel_id"],
             "response_url": command["response_url"],  # 30분간 유효
