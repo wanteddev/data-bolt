@@ -9,7 +9,6 @@ import re
 import time
 from typing import Any, Optional
 
-from anyio import to_thread
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -107,9 +106,9 @@ def _get_refine_attempts() -> int:
         return 1
 
 
-async def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload)
+def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=payload)
         resp.raise_for_status()
         try:
             return resp.json()
@@ -268,17 +267,17 @@ class _SSMParameterLoader:
 _ssm_loader = _SSMParameterLoader()
 
 
-async def _get_laas_api_key() -> str:
+def _get_laas_api_key() -> str:
     env_key = os.getenv("LAAS_API_KEY")
     if env_key:
         return env_key
     param_key = os.getenv("LAAS_API_KEY_SSM_PARAM", LAAS_API_KEY_SSM_PARAM)
-    return await to_thread.run_sync(_ssm_loader.get_parameter, param_key, True)
+    return _ssm_loader.get_parameter(param_key, True)
 
 
-async def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
     base_url = os.getenv("LAAS_BASE_URL", LAAS_DEFAULT_BASE_URL).rstrip("/")
-    api_key = await _get_laas_api_key()
+    api_key = _get_laas_api_key()
 
     url = f"{base_url}{path}"
     headers = {
@@ -286,13 +285,13 @@ async def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> dict
         "apiKey": api_key,
         "Content-Type": "application/json; charset=utf-8",
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         return resp.json()
 
 
-async def _vector_search(
+def _vector_search(
     *,
     collection: str,
     text: str,
@@ -308,7 +307,7 @@ async def _vector_search(
         "min_score": min_score,
     }
     try:
-        resp = await _laas_post(
+        resp = _laas_post(
             f"/api/document/{collection}/similar/text", payload, timeout=30.0
         )
         return resp if isinstance(resp, list) else []
@@ -332,7 +331,7 @@ def _join_doc_texts(docs: list[dict[str, Any]]) -> str:
     return "\n".join(texts)
 
 
-async def _collect_rag_context(question: str) -> dict[str, str]:
+def _collect_rag_context(question: str) -> dict[str, str]:
     schema_collection = os.getenv(
         "LAAS_RAG_SCHEMA_COLLECTION", LAAS_RAG_SCHEMA_COLLECTION
     )
@@ -344,13 +343,13 @@ async def _collect_rag_context(question: str) -> dict[str, str]:
     schema_min_score = float(os.getenv("LAAS_RAG_SCHEMA_MIN_SCORE", "0.5"))
     glossary_min_score = float(os.getenv("LAAS_RAG_GLOSSARY_MIN_SCORE", "0.5"))
 
-    schema_docs = await _vector_search(
+    schema_docs = _vector_search(
         collection=schema_collection,
         text=question,
         limit=schema_limit,
         min_score=schema_min_score,
     )
-    glossary_docs = await _vector_search(
+    glossary_docs = _vector_search(
         collection=glossary_collection,
         text=question,
         limit=glossary_limit,
@@ -363,7 +362,7 @@ async def _collect_rag_context(question: str) -> dict[str, str]:
     }
 
 
-async def generate_bigquery_response(
+def generate_bigquery_response(
     *,
     question: str,
     table_info: str,
@@ -381,10 +380,10 @@ async def generate_bigquery_response(
         instruction_type=instruction_type,
     )
     payload = {"hash": LAAS_EMPTY_PRESET_HASH, "messages": messages}
-    return await _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
+    return _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
 
 
-async def refine_bigquery_sql(
+def refine_bigquery_sql(
     *,
     question: str,
     ddl_context: str,
@@ -447,7 +446,7 @@ async def refine_bigquery_sql(
         ],
     }
     try:
-        resp = await _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
+        resp = _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
         content = (
             (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
             if isinstance(resp, dict)
@@ -460,14 +459,14 @@ async def refine_bigquery_sql(
         return ""
 
 
-async def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
+def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
     url = os.getenv("BIGQUERY_DRYRUN_URL")
     if not url:
         return False, {"error": "BIGQUERY_DRYRUN_URL is not set"}
 
     payload = {"sql": sql, "dry_run": True}
     try:
-        resp = await _post_json(url, payload, timeout=30.0)
+        resp = _post_json(url, payload, timeout=30.0)
         ok = resp.get("success")
         if ok is None:
             ok = resp.get("ok")
@@ -519,7 +518,7 @@ def _validation_enabled() -> bool:
     return bool(os.getenv("BIGQUERY_DRYRUN_URL"))
 
 
-async def _validate_with_refine(
+def _validate_with_refine(
     *,
     question: str,
     ddl_context: str,
@@ -539,7 +538,7 @@ async def _validate_with_refine(
     }
 
     validation_meta["attempts"] += 1
-    ok, meta = await _dry_run_sql(sql)
+    ok, meta = _dry_run_sql(sql)
     if ok:
         validation_meta.update(
             {
@@ -559,7 +558,7 @@ async def _validate_with_refine(
     while refine_attempted < max_refine:
         refine_attempted += 1
         validation_meta["attempts"] += 1
-        refined_text = await refine_bigquery_sql(
+        refined_text = refine_bigquery_sql(
             question=question,
             ddl_context=ddl_context,
             prev_sql=sql,
@@ -567,7 +566,7 @@ async def _validate_with_refine(
         )
         refined_blocks = extract_sql_blocks(refined_text or "")
         for candidate in refined_blocks:
-            ok, meta = await _dry_run_sql(candidate)
+            ok, meta = _dry_run_sql(candidate)
             if ok:
                 validation_meta.update(
                     {
@@ -587,7 +586,7 @@ async def _validate_with_refine(
     return validation_meta
 
 
-async def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
+def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
     question = payload.get("text") or payload.get("question") or ""
     table_info = payload.get("table_info", "")
     glossary_info = payload.get("glossary_info", "")
@@ -595,7 +594,7 @@ async def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
     images = payload.get("images") or []
 
     if question and (not table_info or not glossary_info):
-        rag_ctx = await _collect_rag_context(question)
+        rag_ctx = _collect_rag_context(question)
         if not table_info:
             table_info = rag_ctx.get("table_info", "")
         if not glossary_info:
@@ -603,7 +602,7 @@ async def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
 
     instruction_type = _classify_instruction_type(question, history)
     try:
-        raw_resp = await generate_bigquery_response(
+        raw_resp = generate_bigquery_response(
             question=question,
             table_info=table_info,
             glossary_info=glossary_info,
@@ -627,7 +626,7 @@ async def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
     if sql and _validation_enabled():
-        validation = await _validate_with_refine(
+        validation = _validate_with_refine(
             question=question,
             ddl_context=table_info,
             glossary_info=glossary_info,

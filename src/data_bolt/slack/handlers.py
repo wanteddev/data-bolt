@@ -83,34 +83,22 @@ async def handle_long_task_command(
     ack: AsyncAck,
     command: dict[str, Any],
     say: AsyncSay,
-    context: AsyncBoltContext,
 ) -> None:
     """
-    Example slash command that triggers background processing.
+    Example slash command handler.
 
-    For long-running tasks, ack immediately and process in background Lambda.
+    For quick processing, handle directly after ack.
     """
     # Immediately acknowledge to avoid 3-second timeout
     await ack("Processing your request... :hourglass_flowing_sand:")
 
-    try:
-        # Invoke background Lambda for actual processing
-        await to_thread.run_sync(
-            invoke_background,
-            "slash_command",
-            {
-                "command": "/longtask",
-                "user_id": command["user_id"],
-                "channel_id": command["channel_id"],
-                "text": command.get("text", ""),
-                "response_url": command["response_url"],
-            },
-        )
-    except SlackBackgroundError as e:
-        logger.error(f"Background task failed for /longtask: {e}")
-        await say(
-            ":x: Sorry, there was an error processing your request. Please try again later."
-        )
+    # ==========================================================================
+    # YOUR LONG-RUNNING LOGIC HERE
+    # Keep it fast; move to SlackBgFunction if it can exceed ~3 seconds.
+    # ==========================================================================
+    text = command.get("text", "")
+    result = f"Processed '{text}' successfully!"
+    await say(f":white_check_mark: {result}")
 
 
 # =============================================================================
@@ -159,7 +147,6 @@ async def handle_app_mention(
 @slack_app.event("message")
 async def handle_message(
     event: dict[str, Any],
-    context: AsyncBoltContext,
     say: AsyncSay,
     ack: AsyncAck,
 ) -> None:
@@ -178,24 +165,10 @@ async def handle_message(
     if channel_type != "im":
         return
 
-    user_id = event["user"]
     text = event.get("text", "")
 
-    try:
-        # Example: Trigger background processing for DMs
-        await to_thread.run_sync(
-            invoke_background,
-            "dm_message",
-            {
-                "user_id": user_id,
-                "channel_id": event["channel"],
-                "text": text,
-                "ts": event["ts"],
-            },
-        )
-        # Quick acknowledgment
-        await say("Got it! Processing your message... :robot_face:")
-
-    except SlackBackgroundError as e:
-        logger.error(f"Background task failed for DM from {user_id}: {e}")
-        await say(":x: Sorry, I couldn't process your message right now. Please try again later.")
+    # ==========================================================================
+    # YOUR DM LOGIC HERE (keep it fast; offload if it grows)
+    # ==========================================================================
+    result = f"I processed your message: '{text}'"
+    await say(result)

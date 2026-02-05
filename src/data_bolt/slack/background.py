@@ -70,8 +70,6 @@ async def process_background_task(event: dict[str, Any]) -> dict[str, Any]:
     logger.info(f"Processing background task: {task_type}")
 
     handlers = {
-        "slash_command": _handle_slash_command_bg,
-        "dm_message": _handle_dm_message_bg,
         "bigquery_sql": handle_bigquery_sql_bg,
         "build_bigquery": handle_bigquery_sql_bg,
     }
@@ -116,78 +114,6 @@ async def process_background_task(event: dict[str, Any]) -> dict[str, Any]:
             error_message="An unexpected error occurred. Please try again later.",
         )
         return {"status": "error", "message": error_msg}
-
-
-async def _handle_slash_command_bg(payload: dict[str, Any]) -> dict[str, Any]:
-    """
-    Background handler for slash commands.
-
-    Use response_url to send delayed responses to Slack.
-    """
-    command = payload.get("command", "")
-    user_id = payload.get("user_id", "")
-    text = payload.get("text", "")
-    response_url = payload.get("response_url", "")
-
-    logger.info(f"Background processing {command} from user {user_id}")
-
-    # ==========================================================================
-    # YOUR LONG-RUNNING LOGIC HERE
-    # Example: API calls, database queries, ML inference, etc.
-    # ==========================================================================
-    import asyncio
-
-    await asyncio.sleep(2)  # Simulate long processing
-    result = f"Processed '{text}' successfully!"
-
-    # Send response via response_url (works for up to 30 minutes after command)
-    if response_url:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                response_url,
-                json={
-                    "response_type": "in_channel",  # or "ephemeral" for private
-                    "text": f":white_check_mark: {result}",
-                },
-            )
-
-    return {"status": "ok", "result": result}
-
-
-async def _handle_dm_message_bg(payload: dict[str, Any]) -> dict[str, Any]:
-    """
-    Background handler for direct messages.
-
-    Use Slack Web API to send responses.
-    """
-    user_id = payload.get("user_id", "")
-    channel_id = payload.get("channel_id", "")
-    text = payload.get("text", "")
-    thread_ts = payload.get("ts", "")
-
-    logger.info(f"Background processing DM from user {user_id}: {text}")
-
-    # ==========================================================================
-    # YOUR LONG-RUNNING LOGIC HERE
-    # ==========================================================================
-    import asyncio
-
-    await asyncio.sleep(2)  # Simulate long processing
-    result = f"I processed your message: '{text}'"
-
-    # Send response via Slack Web API
-    try:
-        await _run_slack_call(
-            slack_client.chat_postMessage,
-            channel=channel_id,
-            text=result,
-            thread_ts=thread_ts,  # Reply in thread
-        )
-    except SlackApiError as e:
-        logger.error(f"Failed to send Slack message: {e}")
-        return {"status": "error", "message": str(e)}
-
-    return {"status": "ok", "result": result}
 
 
 def _extract_sql_from_result(result: dict[str, Any]) -> str | None:
@@ -245,7 +171,7 @@ async def handle_bigquery_sql_bg(payload: dict) -> dict[str, Any]:
     - response_url or channel_id
     - optional thread_ts
     """
-    from data_bolt.bigquery_sql import build_bigquery_sql
+    from data_bolt.tasks.bigquery_sql import build_bigquery_sql
 
     response_url = payload.get("response_url")
     channel_id = payload.get("channel_id")
@@ -254,7 +180,7 @@ async def handle_bigquery_sql_bg(payload: dict) -> dict[str, Any]:
 
     logger.info("Background processing BigQuery SQL request")
 
-    result = await build_bigquery_sql(payload)
+    result = await to_thread.run_sync(build_bigquery_sql, payload)
     message = _format_bigquery_response(result)
 
     try:
