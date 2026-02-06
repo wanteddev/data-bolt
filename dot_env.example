@@ -30,3 +30,15 @@ SLACK_SIGNING_SECRET=your-signing-secret
 #   - deploy_stack.sh will pass these as CloudFormation parameters
 # =============================================================================
 # LAMBDA_YOUR_VAR_NAME=your-value
+
+# =============================================================================
+# Optional: LangGraph / BigQuery Agent Settings
+# =============================================================================
+# LAMBDA_LANGGRAPH_CHECKPOINT_BACKEND=memory
+# LAMBDA_LANGGRAPH_POSTGRES_URI=postgresql://user@localhost:5432/postgres
+# LAMBDA_SLACK_CHANNEL_AUTO_REPLY=true
+# LAMBDA_SLACK_CHANNEL_AUTO_REPLY_ALLOWLIST=C01234567,C08999999
+# LAMBDA_SLACK_CHANNEL_AUTO_REPLY_KEYWORDS=bigquery,bq,sql,쿼리,빅쿼리,테이블,스키마,데이터
+# LAMBDA_SLACK_CHANNEL_AUTO_REPLY_IN_THREADS=true
+# LAMBDA_BIGQUERY_MAX_BYTES_BILLED=0
+# LAMBDA_BIGQUERY_EXECUTE_URL=https://your-executor.example.com/query

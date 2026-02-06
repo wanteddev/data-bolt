@@ -3,14 +3,20 @@
 import json
 import logging
 import os
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 import boto3
 from anyio import to_thread
 from botocore.exceptions import ClientError
 from slack_bolt.async_app import AsyncAck, AsyncBoltContext, AsyncSay
 
+from data_bolt.tasks.relevance import should_respond_to_message
+
 from .app import slack_app
+
+if TYPE_CHECKING:
+    from data_bolt.tasks.bigquery_agent import AgentPayload
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +30,41 @@ class SlackBackgroundError(Exception):
     pass
 
 
-def invoke_background(task_type: str, payload: dict[str, Any]) -> None:
+def _should_process_message_event(event: dict[str, Any], text: str) -> bool:
+    if event.get("bot_id") or event.get("subtype"):
+        return False
+
+    is_thread_followup = bool(event.get("thread_ts")) and event.get("thread_ts") != event.get("ts")
+    return should_respond_to_message(
+        text=text,
+        channel_type=str(event.get("channel_type") or ""),
+        is_mention=False,
+        is_thread_followup=is_thread_followup,
+        channel_id=str(event.get("channel") or ""),
+    )
+
+
+def _build_bigquery_payload(
+    event: dict[str, Any], text: str, *, is_mention: bool
+) -> "AgentPayload":
+    payload: AgentPayload = {
+        "user_id": str(event.get("user") or ""),
+        "channel_id": str(event.get("channel") or ""),
+        "channel_type": str(event.get("channel_type") or ""),
+        "thread_ts": str(event.get("thread_ts") or event.get("ts") or ""),
+        "message_ts": str(event.get("ts") or ""),
+        "is_thread_followup": bool(
+            event.get("thread_ts") and event.get("thread_ts") != event.get("ts")
+        ),
+        "is_mention": is_mention,
+        "text": text,
+        "team_id": str(event.get("team") or ""),
+        "include_thread_history": True,
+    }
+    return payload
+
+
+def invoke_background(task_type: str, payload: Mapping[str, Any]) -> None:
     """
     Invoke background Lambda for long-running tasks.
 
@@ -106,13 +146,7 @@ async def handle_app_mention(
         await to_thread.run_sync(
             invoke_background,
             "bigquery_sql",
-            {
-                "user_id": user_id,
-                "channel_id": event["channel"],
-                "thread_ts": event.get("thread_ts") or event.get("ts"),
-                "message_ts": event.get("ts"),
-                "text": text,
-            },
+            _build_bigquery_payload(event, text, is_mention=True),
         )
     except SlackBackgroundError as e:
         logger.error(f"Background task failed for mention from {user_id}: {e}")
@@ -123,6 +157,7 @@ async def handle_app_mention(
 async def handle_message(
     event: dict[str, Any],
     say: AsyncSay,
+    context: AsyncBoltContext,
     ack: AsyncAck,
 ) -> None:
     """
@@ -131,19 +166,26 @@ async def handle_message(
     Only processes DMs (im channel type). Ignores bot messages to prevent loops.
     """
     await ack()
-    # Ignore bot messages and message subtypes (edits, deletes, etc.)
-    if event.get("bot_id") or event.get("subtype"):
-        return
-
-    # Only respond to direct messages
-    channel_type = event.get("channel_type", "")
-    if channel_type != "im":
-        return
-
     text = event.get("text", "")
+    if not _should_process_message_event(event, text):
+        return
 
-    # ==========================================================================
-    # YOUR DM LOGIC HERE (keep it fast; offload if it grows)
-    # ==========================================================================
-    result = f"I processed your message: '{text}'"
-    await say(result)
+    try:
+        if event.get("channel_type") != "im":
+            try:
+                await context.client.reactions_add(
+                    channel=event["channel"], name="loading", timestamp=event["ts"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to add loading reaction: {e}")
+        await to_thread.run_sync(
+            invoke_background,
+            "bigquery_sql",
+            _build_bigquery_payload(event, text, is_mention=False),
+        )
+    except SlackBackgroundError as e:
+        logger.error(f"Background task failed for message event: {e}")
+        await say(
+            ":x: 요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+            thread_ts=event.get("thread_ts") or event.get("ts"),
+        )

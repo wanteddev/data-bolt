@@ -23,6 +23,7 @@ LAAS_EMPTY_PRESET_HASH = "2e1cfa82b035c26cbbbdae632cea070514eb8b773f616aaeaf668e
 LAAS_API_KEY_SSM_PARAM = "/DATA/PIPELINE/API_KEY/OPENAI"
 LAAS_RAG_SCHEMA_COLLECTION = "RAG_DATA_CATALOG"
 LAAS_RAG_GLOSSARY_COLLECTION = "RAG_GLOSSARY"
+BIGQUERY_ON_DEMAND_USD_PER_TB = float(os.getenv("BIGQUERY_ON_DEMAND_USD_PER_TB", "5"))
 
 
 def extract_sql_blocks(text: str, min_length: int = 20) -> list[str]:
@@ -116,6 +117,27 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, A
             return {"content": data}
         except Exception:
             return {"content": resp.text}
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def estimate_query_cost_usd(
+    total_bytes_processed: int | str | None,
+    *,
+    price_per_tb_usd: float = BIGQUERY_ON_DEMAND_USD_PER_TB,
+) -> float | None:
+    bytes_processed = _coerce_int(total_bytes_processed)
+    if bytes_processed is None or bytes_processed < 0:
+        return None
+    tebibyte = float(1024**4)
+    return round((bytes_processed / tebibyte) * price_per_tb_usd, 6)
 
 
 def _build_instruction_block(instruction_type: str) -> str:
@@ -478,26 +500,163 @@ def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
         return False, {"error": str(e)}
 
 
+def dry_run_bigquery_sql(sql: str) -> dict[str, Any]:
+    ok, meta = _dry_run_sql(sql)
+    return {
+        "success": ok,
+        "sql": _ensure_trailing_semicolon(sql) if ok else None,
+        "error": meta.get("error"),
+        "total_bytes_processed": meta.get("total_bytes_processed"),
+        "estimated_cost_usd": estimate_query_cost_usd(meta.get("total_bytes_processed")),
+        "job_id": meta.get("job_id"),
+        "cache_hit": meta.get("cache_hit"),
+    }
+
+
+def execute_bigquery_sql(sql: str) -> dict[str, Any]:
+    url = os.getenv("BIGQUERY_EXECUTE_URL")
+    if not url:
+        return {
+            "success": False,
+            "error": "BIGQUERY_EXECUTE_URL is not set",
+            "job_id": None,
+            "row_count": None,
+            "preview_rows": [],
+        }
+
+    payload = {"sql": sql, "dry_run": False}
+    try:
+        resp = _post_json(url, payload, timeout=60.0)
+        success = resp.get("success")
+        if success is None:
+            success = resp.get("ok")
+        if success is None:
+            success = "error" not in resp
+
+        rows = resp.get("rows") or resp.get("data") or []
+        preview_rows = rows[: int(os.getenv("BIGQUERY_RESULT_PREVIEW_ROWS", "20"))] if rows else []
+
+        return {
+            "success": bool(success),
+            "error": resp.get("error"),
+            "job_id": resp.get("job_id"),
+            "row_count": resp.get("row_count") or (len(rows) if isinstance(rows, list) else None),
+            "preview_rows": preview_rows if isinstance(preview_rows, list) else [],
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "job_id": None,
+            "row_count": None,
+            "preview_rows": [],
+        }
+
+
 def _extract_sql_from_response(resp: JsonValue) -> tuple[str | None, str | None]:
     sql = resp.get("sql") if isinstance(resp, dict) else None
     explanation = resp.get("explanation") if isinstance(resp, dict) else None
     if isinstance(sql, str) and sql.strip():
         return sql.strip(), explanation
 
-    choices = (resp.get("choices") or []) if isinstance(resp, dict) else []
-    if choices:
-        message = (choices[0] or {}).get("message", {})
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            parsed = _parse_json_response(content)
-            parsed_sql = parsed.get("sql")
-            parsed_explanation = parsed.get("explanation")
-            if isinstance(parsed_sql, str) and parsed_sql.strip():
-                return parsed_sql.strip(), parsed_explanation
-            blocks = extract_sql_blocks(content)
-            return (blocks[0] if blocks else content.strip()), explanation
+    contents = _collect_candidate_contents(resp)
+    for content in contents:
+        parsed = _parse_json_response(content)
+        parsed_sql = parsed.get("sql")
+        parsed_explanation = parsed.get("explanation")
+        if isinstance(parsed_sql, str) and parsed_sql.strip():
+            resolved_explanation = (
+                parsed_explanation
+                if isinstance(parsed_explanation, str)
+                else explanation
+                if isinstance(explanation, str)
+                else None
+            )
+            return parsed_sql.strip(), resolved_explanation
+
+        blocks = extract_sql_blocks(content)
+        if blocks:
+            return blocks[0], explanation
+        if content.strip():
+            return content.strip(), explanation
 
     return None, explanation
+
+
+def _extract_text_content(content: Any) -> str | None:
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            text = _extract_text_content(item)
+            if text:
+                parts.append(text)
+        if parts:
+            return "\n".join(parts)
+        return None
+
+    if isinstance(content, dict):
+        for key in ("text", "content", "value", "output_text"):
+            text = _extract_text_content(content.get(key))
+            if text:
+                return text
+    return None
+
+
+def _collect_candidate_contents(resp: JsonValue) -> list[str]:
+    if not isinstance(resp, dict):
+        return []
+
+    candidates: list[str] = []
+
+    for key in ("content", "text", "output_text"):
+        text = _extract_text_content(resp.get(key))
+        if text:
+            candidates.append(text)
+
+    message_text = _extract_text_content(resp.get("message"))
+    if message_text:
+        candidates.append(message_text)
+
+    choices = resp.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict):
+                text = _extract_text_content(message.get("content"))
+                if text:
+                    candidates.append(text)
+            text = _extract_text_content(choice.get("content"))
+            if text:
+                candidates.append(text)
+
+    output = resp.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            text = _extract_text_content(item.get("content"))
+            if text:
+                candidates.append(text)
+
+    return candidates
+
+
+def adapt_laas_response_for_agent(raw_resp: JsonValue, instruction_type: str) -> dict[str, Any]:
+    sql, explanation = _extract_sql_from_response(raw_resp)
+    return {
+        "choices": [{"message": {"content": (sql or "").strip()}}],
+        "answer_structured": {
+            "sql": sql,
+            "explanation": explanation,
+            "instruction_type": instruction_type,
+        },
+        "raw_response": raw_resp,
+    }
 
 
 def _parse_json_response(content: str) -> dict[str, Any]:
@@ -529,6 +688,7 @@ def _validate_with_refine(
         "sql": None,
         "error": None,
         "total_bytes_processed": None,
+        "estimated_cost_usd": None,
         "cache_hit": False,
         "job_id": None,
         "refinement_error": None,
@@ -542,6 +702,7 @@ def _validate_with_refine(
                 "success": True,
                 "sql": _ensure_trailing_semicolon(sql),
                 "total_bytes_processed": meta.get("total_bytes_processed"),
+                "estimated_cost_usd": estimate_query_cost_usd(meta.get("total_bytes_processed")),
                 "job_id": meta.get("job_id"),
                 "cache_hit": meta.get("cache_hit"),
             }
@@ -571,6 +732,9 @@ def _validate_with_refine(
                         "refined": True,
                         "sql": _ensure_trailing_semicolon(candidate),
                         "total_bytes_processed": meta.get("total_bytes_processed"),
+                        "estimated_cost_usd": estimate_query_cost_usd(
+                            meta.get("total_bytes_processed")
+                        ),
                         "job_id": meta.get("job_id"),
                         "cache_hit": meta.get("cache_hit"),
                     }
@@ -611,18 +775,11 @@ def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
         logger.error("bigquery_sql.generate_failed", extra={"error": str(e)})
         return {"error": str(e)}
 
-    sql, explanation = _extract_sql_from_response(raw_resp)
-    response: dict[str, Any] = {
-        "choices": [{"message": {"content": (sql or "").strip()}}],
-        "answer_structured": {
-            "sql": sql,
-            "explanation": explanation,
-            "instruction_type": instruction_type,
-        },
-        "raw_response": raw_resp,
-    }
+    response = adapt_laas_response_for_agent(raw_resp, instruction_type)
+    answer_structured = response.get("answer_structured")
+    sql = answer_structured.get("sql") if isinstance(answer_structured, dict) else None
 
-    if sql and _validation_enabled():
+    if isinstance(sql, str) and sql and _validation_enabled():
         validation = _validate_with_refine(
             question=question,
             ddl_context=table_info,
