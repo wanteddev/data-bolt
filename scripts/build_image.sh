@@ -21,6 +21,7 @@ CACHE_TAG="${IMAGE_CACHE_TAG:-cache}"
 CACHE_REF="${IMAGE_CACHE_REF:-}"
 USE_ECR_CACHE="${USE_ECR_CACHE:-1}"
 AWS_CMD="${AWS_CMD:-aws}"
+NO_DEFAULT_ATTESTATIONS="${BUILDX_NO_DEFAULT_ATTESTATIONS:-1}"
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   DIRTY_COUNT="$(git status --porcelain | wc -l | tr -d ' ')"
@@ -60,13 +61,26 @@ if [[ "$USE_ECR_CACHE" == "1" ]]; then
   fi
 fi
 
-DOCKER_BUILDKIT=1 docker build \
-  --platform linux/arm64 \
-  --build-arg BUILDKIT_INLINE_CACHE=1 \
-  "${cache_args[@]}" \
-  -t "$FULL" \
-  -f "$DOCKERFILE_PATH" \
+if [[ "$NO_DEFAULT_ATTESTATIONS" == "1" ]]; then
+  # Lambda rejects OCI index/attestation manifests in some Docker/BuildKit defaults.
+  export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+fi
+
+build_cmd=(
+  docker build
+  --platform linux/arm64
+  --build-arg BUILDKIT_INLINE_CACHE=1
+)
+if ((${#cache_args[@]})); then
+  build_cmd+=("${cache_args[@]}")
+fi
+build_cmd+=(
+  -t "$FULL"
+  -f "$DOCKERFILE_PATH"
   "$CONTEXT"
+)
+
+DOCKER_BUILDKIT=1 "${build_cmd[@]}"
 printf '%s\n' "$TAG" > "${IMAGE_TAG_CACHE:-.last_image_tag}"
 if command -v python3 >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   GIT_SHA="$(git rev-parse HEAD)"
