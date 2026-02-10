@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import pytest
 
-from data_bolt.tasks import bigquery_agent
+from data_bolt.tasks.bigquery_agent import service as bigquery_agent
 
 
 @pytest.fixture(autouse=True)
@@ -178,6 +178,37 @@ def test_run_bigquery_agent_chat_planner_can_call_data_node(monkeypatch) -> None
     assert "쿼리를 같이 만들었어요." in result["response_text"]
 
 
+def test_run_bigquery_agent_does_not_use_choices_text_as_sql(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_agent,
+        "build_bigquery_sql",
+        lambda _payload: {
+            "answer_structured": {"sql": None, "explanation": "설명문과 SQL이 섞인 응답"},
+            "choices": [{"message": {"content": "아래 SQL을 실행하세요.\nSELECT 1 AS value;"}}],
+            "validation": {},
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
+        "dry_run_bigquery_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("dry-run should not be called")),
+    )
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D1",
+            "thread_ts": "100.31",
+            "channel_type": "im",
+            "text": "사용자 수 알려줘",
+        }
+    )
+
+    assert result["routing"]["route"] == "data"
+    assert result["candidate_sql"] is None
+    assert "SELECT 1 AS value" not in result["response_text"]
+
+
 def test_run_bigquery_agent_executes_when_requested(monkeypatch) -> None:
     called: dict[str, str] = {}
 
@@ -206,6 +237,61 @@ def test_run_bigquery_agent_executes_when_requested(monkeypatch) -> None:
     assert called["dry_sql"] == "SELECT 1 AS value;"
     assert called["exec_sql"] == "SELECT 1 AS value;"
     assert result["execution"]["success"] is True
+
+
+def test_run_bigquery_agent_blocks_write_or_ddl_sql_execution(monkeypatch) -> None:
+    execute_called = False
+
+    monkeypatch.setattr(
+        bigquery_agent,
+        "dry_run_bigquery_sql",
+        lambda _sql: {"success": True, "total_bytes_processed": 0, "estimated_cost_usd": 0.0},
+    )
+
+    def fake_execute(_sql: str):
+        nonlocal execute_called
+        execute_called = True
+        return {"success": True}
+
+    monkeypatch.setattr(bigquery_agent, "execute_bigquery_sql", fake_execute)
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D2",
+            "thread_ts": "100.401",
+            "channel_type": "im",
+            "text": "이 쿼리 실행해줘\n```sql\nDROP TABLE users;\n```",
+        }
+    )
+
+    assert result["intent"] == "execute_sql"
+    assert result["execution"]["success"] is False
+    assert "읽기 전용 SELECT" in result["execution"]["error"]
+    assert execute_called is False
+
+
+def test_run_bigquery_agent_requires_sql_block_for_execution(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_agent,
+        "build_bigquery_sql",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("build should not be called")),
+    )
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D2",
+            "thread_ts": "100.402",
+            "channel_type": "im",
+            "text": "지난주 가입자 수 쿼리 실행해줘",
+        }
+    )
+
+    assert result["intent"] == "execute_sql"
+    assert result["execution"]["success"] is False
+    assert "SQL 코드 블록" in result["execution"]["error"]
+    assert result["candidate_sql"] is None
 
 
 def test_run_bigquery_agent_does_not_leak_previous_response_on_ignore(monkeypatch) -> None:

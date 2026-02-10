@@ -1,6 +1,6 @@
 from typing import Any
 
-from data_bolt.tasks import bigquery_sql
+from data_bolt.tasks.bigquery import service as bigquery_sql
 
 
 def test_build_bigquery_sql_returns_structured_response(monkeypatch) -> None:
@@ -127,6 +127,28 @@ def test_build_bigquery_sql_returns_error_on_failure(monkeypatch) -> None:
     result = bigquery_sql.build_bigquery_sql({"text": "count users"})
 
     assert "error" in result
+    assert result["answer_structured"]["sql"] is None
+    assert result["answer_structured"]["instruction_type"] == "bigquery_sql_generation"
+    assert result["choices"][0]["message"]["content"] == ""
+
+
+def test_build_bigquery_sql_enforces_structured_contract(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_sql,
+        "generate_bigquery_response",
+        lambda **_kwargs: {"choices": [{"message": {"content": "plain text"}}]},
+    )
+    monkeypatch.setattr(
+        bigquery_sql,
+        "adapt_llm_response_for_agent",
+        lambda _raw, _instruction: {"answer_structured": {"sql": "  ", "explanation": 1}},
+    )
+
+    result = bigquery_sql.build_bigquery_sql({"text": "count users", "table_info": "ddl"})
+
+    assert result["answer_structured"]["sql"] is None
+    assert result["answer_structured"]["explanation"] == ""
+    assert result["choices"][0]["message"]["content"] == ""
 
 
 def test_build_bigquery_sql_refines_when_initial_dry_run_fails(monkeypatch) -> None:
@@ -346,3 +368,42 @@ def test_parse_json_response_supports_fenced_json() -> None:
     parsed = bigquery_sql._parse_json_response(content)
     assert parsed["sql"] == ""
     assert parsed["explanation"] == "안녕하세요"
+
+
+def test_build_bigquery_sql_does_not_promote_plain_text_to_sql(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_sql,
+        "generate_bigquery_response",
+        lambda **_kwargs: {
+            "choices": [{"message": {"content": "SELECT COUNT(*) AS cnt FROM users"}}]
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_sql,
+        "_dry_run_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("dry-run should not be called")),
+    )
+
+    result = bigquery_sql.build_bigquery_sql({"text": "count users", "table_info": "ddl"})
+
+    assert result["answer_structured"]["sql"] is None
+    assert result["choices"][0]["message"]["content"] == ""
+
+
+def test_build_bigquery_sql_general_chat_plain_text_skips_dry_run(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_sql,
+        "generate_bigquery_response",
+        lambda **_kwargs: {"choices": [{"message": {"content": "안녕하세요"}}]},
+    )
+    monkeypatch.setattr(
+        bigquery_sql,
+        "_dry_run_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("dry-run should not be called")),
+    )
+
+    result = bigquery_sql.build_bigquery_sql({"text": "안녕", "instruction_type": "general_chat"})
+
+    assert result["answer_structured"]["sql"] is None
+    assert result["answer_structured"]["explanation"] == "안녕하세요"
+    assert "validation" not in result
