@@ -5,34 +5,49 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from data_bolt.tasks.bigquery_sql import (
     build_bigquery_sql,
+    classify_intent_with_laas,
     dry_run_bigquery_sql,
     execute_bigquery_sql,
     extract_sql_blocks,
+    plan_free_chat_with_laas,
 )
-from data_bolt.tasks.relevance import should_respond_to_message
+from data_bolt.tasks.relevance import looks_like_data_request, should_respond_to_message
 
 logger = logging.getLogger(__name__)
 
 _CONVERSATION_CLIP_LIMIT = int(os.getenv("BIGQUERY_AGENT_CONVERSATION_CLIP_LIMIT", "20"))
-
+_ALLOWED_ACTIONS = {
+    "text_to_sql",
+    "validate_sql",
+    "execute_sql",
+    "schema_lookup",
+    "analysis_followup",
+}
 
 Intent = Literal[
     "ignore",
+    "chat",
     "schema_lookup",
     "text_to_sql",
     "validate_sql",
     "execute_sql",
     "analysis_followup",
+    "data_workflow",
+    "free_chat",
 ]
+Route = Literal["data", "chat"]
 
 
 class ConversationMessage(TypedDict):
@@ -70,6 +85,7 @@ class AgentResult(TypedDict):
     execution: dict[str, Any]
     generation_result: dict[str, Any]
     conversation_turns: int
+    routing: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +126,29 @@ class AgentState(TypedDict, total=False):
     execution: dict[str, Any]
     response_text: str
     error: str | None
+    route: Route
+    intent_confidence: float
+    intent_reason: str
+    planned_actions: list[str]
+    chat_result: dict[str, Any]
+    fallback_used: bool
+    planner_reason: str
 
 
-_memory_graph: Any = None
-_memory_checkpointer: InMemorySaver | None = None
-_postgres_setup_done = False
+AgentGraphBuilder = StateGraph[AgentState, None, Any, Any]
+CompiledAgentGraph = CompiledStateGraph[AgentState, None, Any, Any]
+
+
+class MemoryRuntimeCache(TypedDict, total=False):
+    graph: CompiledAgentGraph
+    saver: InMemorySaver
+
+
+_memory_runtime_cache: MemoryRuntimeCache = {}
+_postgres_graph_cache: dict[str, CompiledAgentGraph] = {}
+_postgres_context_cache: dict[str, AbstractContextManager[Any]] = {}
+_postgres_setup_done: set[str] = set()
+_dynamodb_graph_cache: dict[tuple[str, str, str], CompiledAgentGraph] = {}
 
 
 def _env_truthy(value: str | None, default: bool = False) -> bool:
@@ -131,18 +165,27 @@ def _extract_user_sql(text: str) -> str | None:
     return None
 
 
-def _classify_intent(text: str, has_sql: bool) -> Intent:
+def _classify_intent_rule(text: str, has_sql: bool) -> Intent:
     lowered = text.lower()
     if any(word in lowered for word in ("실행", "run", "execute", "돌려", "조회해줘")):
         return "execute_sql"
     if has_sql and any(word in lowered for word in ("검증", "dry", "비용", "validate", "오류")):
         return "validate_sql"
-    if any(word in lowered for word in ("스키마", "schema", "table", "컬럼")):
+    if any(
+        word in lowered
+        for word in ("스키마", "schema", "table", "컬럼", "column", "db", "database")
+    ):
         return "schema_lookup"
     if has_sql and any(
         word in lowered for word in ("분석", "해석", "설명", "optimize", "느려", "왜")
     ):
         return "analysis_followup"
+    if looks_like_data_request(text):
+        return "text_to_sql"
+    if any(word in lowered for word in ("조회", "집계", "몇명", "사용자 수", "count", "통계")):
+        return "text_to_sql"
+    if not has_sql and not looks_like_data_request(text):
+        return "chat"
     return "text_to_sql"
 
 
@@ -209,6 +252,64 @@ def _normalize_history(value: Any) -> list[ConversationMessage]:
     return history
 
 
+def _coerce_actions(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip().lower()
+        if not normalized or normalized == "none":
+            continue
+        if normalized in _ALLOWED_ACTIONS:
+            out.append(normalized)
+    return out
+
+
+def _build_routing_meta(state: AgentState) -> dict[str, Any]:
+    return {
+        "intent": state.get("intent") or "",
+        "confidence": state.get("intent_confidence", 0.0),
+        "reason": state.get("intent_reason") or "",
+        "actions": state.get("planned_actions") or [],
+        "route": state.get("route") or "",
+        "fallback_used": bool(state.get("fallback_used")),
+        "planner_reason": state.get("planner_reason") or "",
+        "prompt_version": "v1",
+    }
+
+
+def _node_reset_turn_state(state: AgentState) -> AgentState:
+    return {
+        "text": (state.get("text") or "").strip(),
+        "should_respond": False,
+        "intent": "ignore",
+        "user_sql": None,
+        "candidate_sql": None,
+        "dry_run": {},
+        "generation_result": {},
+        "can_execute": False,
+        "execution": {},
+        "response_text": "",
+        "error": None,
+        "route": "chat",
+        "intent_confidence": 0.0,
+        "intent_reason": "",
+        "planned_actions": [],
+        "chat_result": {},
+        "fallback_used": False,
+        "planner_reason": "",
+    }
+
+
+def _node_clear_response(state: AgentState) -> AgentState:
+    return {
+        "should_respond": False,
+        "response_text": "",
+    }
+
+
 def _node_ingest(state: AgentState) -> AgentState:
     text = (state.get("text") or "").strip()
     conversation = list(state.get("conversation") or [])
@@ -232,23 +333,121 @@ def _node_classify_relevance(state: AgentState) -> AgentState:
     )
     if should_respond:
         return {"should_respond": True}
-    return {"should_respond": False, "intent": "ignore"}
+    return {"should_respond": False, "intent": "ignore", "route": "chat"}
 
 
-def _node_classify_intent(state: AgentState) -> AgentState:
+def _node_classify_intent_llm(state: AgentState) -> AgentState:
     text = state.get("text", "")
     user_sql = _extract_user_sql(text)
-    return {"user_sql": user_sql, "intent": _classify_intent(text, bool(user_sql))}
+    llm_enabled = _env_truthy(os.getenv("BIGQUERY_INTENT_LLM_ENABLED"), True)
+    confidence_threshold = float(os.getenv("BIGQUERY_INTENT_CONFIDENCE_THRESHOLD", "0.55"))
+    fallback_used = False
+
+    if llm_enabled:
+        try:
+            raw = classify_intent_with_laas(
+                text=text,
+                history=cast(list[dict[str, Any]], state.get("conversation") or []),
+                channel_type=state.get("channel_type", ""),
+                is_mention=bool(state.get("is_mention")),
+                is_thread_followup=bool(state.get("is_thread_followup")),
+            )
+            raw_intent = _coerce_str(raw.get("intent"), "free_chat").lower()
+            confidence = float(raw.get("confidence", 0.0))
+            reason = _coerce_str(raw.get("reason"), "llm routing")
+            actions = _coerce_actions(raw.get("actions"))
+            route: Route = "data" if raw_intent == "data_workflow" else "chat"
+            intent: Intent = "data_workflow" if route == "data" else "free_chat"
+            if route == "data" and confidence < confidence_threshold:
+                route = "chat"
+                intent = "free_chat"
+                reason = f"low confidence fallback: {reason}"
+            return {
+                "user_sql": user_sql,
+                "intent": intent,
+                "route": route,
+                "intent_confidence": confidence,
+                "intent_reason": reason,
+                "planned_actions": actions,
+                "fallback_used": False,
+            }
+        except Exception as e:
+            logger.warning("bigquery_agent.intent_llm_fallback", extra={"error": str(e)})
+            fallback_used = True
+
+    rule_intent = _classify_intent_rule(text, bool(user_sql))
+    route = "chat" if rule_intent == "chat" else "data"
+    routed_intent: Intent = "free_chat" if route == "chat" else "data_workflow"
+    fallback_actions: list[str] = [] if route == "chat" else [rule_intent]
+    return {
+        "user_sql": user_sql,
+        "intent": routed_intent,
+        "route": route,
+        "intent_confidence": 0.51 if route == "data" else 0.49,
+        "intent_reason": "rule-based fallback",
+        "planned_actions": fallback_actions,
+        "fallback_used": fallback_used or not llm_enabled,
+    }
 
 
-def _node_generate_or_validate(state: AgentState) -> AgentState:
+def _node_free_chat_planner(state: AgentState) -> AgentState:
+    max_actions = max(1, int(os.getenv("BIGQUERY_CHAT_PLANNER_MAX_ACTIONS", "2")))
+    allow_execute = _env_truthy(os.getenv("BIGQUERY_CHAT_ALLOW_EXECUTE_IN_CHAT"), False)
+
+    planned: dict[str, Any] = {}
+    planner_reason = ""
+    actions: list[str] = []
+    try:
+        planned = plan_free_chat_with_laas(
+            text=state.get("text", ""),
+            history=cast(list[dict[str, Any]], state.get("conversation") or []),
+            allow_execute_in_chat=allow_execute,
+            max_actions=max_actions,
+        )
+        actions = _coerce_actions(planned.get("actions"))
+        if not allow_execute:
+            actions = [action for action in actions if action != "execute_sql"]
+        actions = actions[:max_actions]
+        planner_reason = _coerce_str(planned.get("action_reason"), "")
+    except Exception as e:
+        logger.warning("bigquery_agent.free_chat_planner_failed", extra={"error": str(e)})
+
+    assistant_response = _coerce_str(planned.get("assistant_response"), "")
+    if not assistant_response:
+        assistant_response = "좋아요. 맥락을 이어서 도와드릴게요. 필요한 조건을 알려주세요."
+
+    normalized_intent: Intent = "chat"
+    if actions:
+        first_action = actions[0]
+        if first_action in _ALLOWED_ACTIONS:
+            normalized_intent = cast(Intent, first_action)
+
+    chat_result = {
+        "assistant_response": assistant_response,
+        "actions": actions,
+        "action_reason": planner_reason,
+    }
+    return {
+        "intent": normalized_intent,
+        "planned_actions": actions,
+        "chat_result": chat_result,
+        "planner_reason": planner_reason,
+    }
+
+
+def _node_data_generate_or_validate(state: AgentState) -> AgentState:
     text = state.get("text", "")
     intent = state.get("intent", "text_to_sql")
+    if intent == "data_workflow":
+        actions = state.get("planned_actions") or []
+        first_action = actions[0] if actions else "text_to_sql"
+        intent = cast(Intent, first_action if first_action in _ALLOWED_ACTIONS else "text_to_sql")
     user_sql = state.get("user_sql")
 
     if intent in {"validate_sql", "execute_sql"} and isinstance(user_sql, str):
         dry_run = dry_run_bigquery_sql(user_sql)
         return {
+            "intent": intent,
             "candidate_sql": user_sql,
             "dry_run": dry_run,
             "generation_result": {
@@ -277,11 +476,24 @@ def _node_generate_or_validate(state: AgentState) -> AgentState:
     dry_run_data: dict[str, Any] = validation if isinstance(validation, dict) else {}
 
     return {
+        "intent": intent,
         "generation_result": result,
         "candidate_sql": sql,
         "dry_run": dry_run_data,
         "error": result.get("error") if isinstance(result.get("error"), str) else None,
     }
+
+
+def _node_validate_candidate_sql(state: AgentState) -> AgentState:
+    sql = state.get("candidate_sql")
+    if not isinstance(sql, str) or not sql.strip():
+        return {}
+
+    dry_run = state.get("dry_run")
+    if isinstance(dry_run, dict) and "success" in dry_run:
+        return {}
+
+    return {"dry_run": dry_run_bigquery_sql(sql)}
 
 
 def _node_policy_gate(state: AgentState) -> AgentState:
@@ -333,9 +545,56 @@ def _node_execute(state: AgentState) -> AgentState:
     return {"execution": execute_bigquery_sql(sql)}
 
 
+def _node_free_chat_respond(state: AgentState) -> AgentState:
+    chat_result_raw = state.get("chat_result")
+    chat_result = chat_result_raw if isinstance(chat_result_raw, dict) else {}
+    assistant_response = _coerce_str(chat_result.get("assistant_response"), "")
+    parts: list[str] = [assistant_response] if assistant_response else []
+
+    if state.get("candidate_sql"):
+        parts.append(f"```sql\n{state.get('candidate_sql')}\n```")
+
+    dry_run = state.get("dry_run") or {}
+    if dry_run:
+        if dry_run.get("success"):
+            parts.append(
+                ":white_check_mark: Dry-run 통과"
+                f"\n- bytes processed: {_format_number(dry_run.get('total_bytes_processed'))}"
+                f"\n- estimated cost (USD): {dry_run.get('estimated_cost_usd', '-')}"
+            )
+        else:
+            parts.append(f":warning: Dry-run 실패\n- error: {dry_run.get('error', '-')}")
+
+    execution = state.get("execution") or {}
+    if execution:
+        if execution.get("success"):
+            preview = execution.get("preview_rows")
+            preview_text = json.dumps(preview, ensure_ascii=False, default=str)[:1500]
+            parts.append(
+                ":rocket: 쿼리 실행 완료"
+                f"\n- job_id: {execution.get('job_id', '-')}"
+                f"\n- row_count: {_format_number(execution.get('row_count'))}"
+                f"\n- preview: `{preview_text}`"
+            )
+        else:
+            parts.append(f":warning: 쿼리 실행 생략/실패\n- reason: {execution.get('error', '-')}")
+
+    response_text = "\n\n".join(part for part in parts if part.strip())
+    if not response_text:
+        response_text = "추가로 확인하고 싶은 내용을 알려주세요."
+    return {"response_text": response_text}
+
+
 def _node_compose_response(state: AgentState) -> AgentState:
     if not state.get("should_respond"):
         return {"response_text": ""}
+
+    route = state.get("route", "data")
+    if route == "chat":
+        response_text = _coerce_str(state.get("response_text"), "")
+        conversation = list(state.get("conversation") or [])
+        conversation.append({"role": "assistant", "content": response_text})
+        return {"response_text": response_text, "conversation": _clip_conversation(conversation)}
 
     result_raw = state.get("generation_result")
     result = result_raw if isinstance(result_raw, dict) else {}
@@ -398,83 +657,186 @@ def _route_relevance(state: AgentState) -> str:
     return "proceed" if state.get("should_respond") else "stop"
 
 
+def _route_intent(state: AgentState) -> str:
+    return "route_data" if state.get("route") == "data" else "route_chat"
+
+
+def _route_chat_plan(state: AgentState) -> str:
+    actions = state.get("planned_actions") or []
+    return "needs_data" if actions else "chat_only"
+
+
 def _route_execution(state: AgentState) -> str:
     intent = state.get("intent", "text_to_sql")
     if intent == "execute_sql" and state.get("can_execute"):
         return "execute"
-    return "skip"
+    return "skip_chat" if state.get("route") == "chat" else "skip_data"
 
 
-def _build_graph() -> Any:
+def _route_after_policy(state: AgentState) -> str:
+    return "chat" if state.get("route") == "chat" else "data"
+
+
+def _build_graph() -> AgentGraphBuilder:
     graph = StateGraph(AgentState)
+    graph.add_node("reset_turn_state", _node_reset_turn_state)
+    graph.add_node("clear_response", _node_clear_response)
     graph.add_node("ingest", _node_ingest)
     graph.add_node("classify_relevance", _node_classify_relevance)
-    graph.add_node("classify_intent", _node_classify_intent)
-    graph.add_node("generate_or_validate", _node_generate_or_validate)
+    graph.add_node("classify_intent_llm", _node_classify_intent_llm)
+    graph.add_node("free_chat_planner", _node_free_chat_planner)
+    graph.add_node("data_generate_or_validate", _node_data_generate_or_validate)
+    graph.add_node("validate_candidate_sql", _node_validate_candidate_sql)
     graph.add_node("policy_gate", _node_policy_gate)
     graph.add_node("execute_sql", _node_execute)
+    graph.add_node("free_chat_respond", _node_free_chat_respond)
     graph.add_node("compose_response", _node_compose_response)
 
-    graph.add_edge(START, "ingest")
-    graph.add_edge("ingest", "classify_relevance")
+    graph.add_edge(START, "reset_turn_state")
+    graph.add_edge("reset_turn_state", "classify_relevance")
     graph.add_conditional_edges(
         "classify_relevance",
         _route_relevance,
-        {"proceed": "classify_intent", "stop": END},
+        {"proceed": "ingest", "stop": "clear_response"},
     )
-    graph.add_edge("classify_intent", "generate_or_validate")
-    graph.add_edge("generate_or_validate", "policy_gate")
+    graph.add_edge("ingest", "classify_intent_llm")
+    graph.add_edge("clear_response", END)
+    graph.add_conditional_edges(
+        "classify_intent_llm",
+        _route_intent,
+        {"route_data": "data_generate_or_validate", "route_chat": "free_chat_planner"},
+    )
+    graph.add_conditional_edges(
+        "free_chat_planner",
+        _route_chat_plan,
+        {"needs_data": "data_generate_or_validate", "chat_only": "free_chat_respond"},
+    )
+    graph.add_edge("data_generate_or_validate", "validate_candidate_sql")
+    graph.add_edge("validate_candidate_sql", "policy_gate")
     graph.add_conditional_edges(
         "policy_gate",
         _route_execution,
-        {"execute": "execute_sql", "skip": "compose_response"},
+        {
+            "execute": "execute_sql",
+            "skip_chat": "free_chat_respond",
+            "skip_data": "compose_response",
+        },
     )
-    graph.add_edge("execute_sql", "compose_response")
+    graph.add_conditional_edges(
+        "execute_sql",
+        _route_after_policy,
+        {"chat": "free_chat_respond", "data": "compose_response"},
+    )
+    graph.add_conditional_edges(
+        "free_chat_respond",
+        _route_after_policy,
+        {"chat": "compose_response", "data": "compose_response"},
+    )
     graph.add_edge("compose_response", END)
     return graph
 
 
 def _invoke_graph_with_memory(input_state: AgentState, thread_id: str) -> AgentState:
-    global _memory_graph, _memory_checkpointer
-
-    if _memory_checkpointer is None:
-        _memory_checkpointer = InMemorySaver()
-    if _memory_graph is None:
-        _memory_graph = _build_graph().compile(checkpointer=_memory_checkpointer)
+    graph = _memory_runtime_cache.get("graph")
+    if graph is None:
+        saver = InMemorySaver()
+        graph = _build_graph().compile(checkpointer=saver)
+        _memory_runtime_cache["graph"] = graph
+        _memory_runtime_cache["saver"] = saver
 
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-    graph_any = cast(Any, _memory_graph)
+    graph_any = cast(Any, graph)
     output = graph_any.invoke(input_state, config=config)
     return cast(AgentState, output)
 
 
 def _ensure_postgres_setup(conn_string: str) -> None:
-    global _postgres_setup_done
-    if _postgres_setup_done:
+    if conn_string in _postgres_setup_done:
         return
 
     from langgraph.checkpoint.postgres import PostgresSaver
 
     with PostgresSaver.from_conn_string(conn_string) as saver:
         saver.setup()
-    _postgres_setup_done = True
+    _postgres_setup_done.add(conn_string)
+
+
+def _get_postgres_graph(conn_string: str) -> CompiledAgentGraph:
+    graph = _postgres_graph_cache.get(conn_string)
+    if graph is not None:
+        return graph
+
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    context_manager = cast(AbstractContextManager[Any], PostgresSaver.from_conn_string(conn_string))
+    saver = cast(Any, context_manager).__enter__()
+    graph = _build_graph().compile(checkpointer=saver)
+    _postgres_context_cache[conn_string] = context_manager
+    _postgres_graph_cache[conn_string] = graph
+    return graph
 
 
 def _invoke_graph_with_postgres(input_state: AgentState, thread_id: str) -> AgentState:
-    from langgraph.checkpoint.postgres import PostgresSaver
-
     conn_string = os.getenv("LANGGRAPH_POSTGRES_URI")
     if not conn_string:
         raise ValueError("LANGGRAPH_POSTGRES_URI is not set")
 
     _ensure_postgres_setup(conn_string)
 
-    with PostgresSaver.from_conn_string(conn_string) as saver:
-        graph = _build_graph().compile(checkpointer=saver)
-        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-        graph_any = cast(Any, graph)
-        output = graph_any.invoke(input_state, config=config)
-        return cast(AgentState, output)
+    graph = _get_postgres_graph(conn_string)
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    graph_any = cast(Any, graph)
+    output = graph_any.invoke(input_state, config=config)
+    return cast(AgentState, output)
+
+
+def _build_dynamodb_saver(
+    *, table_name: str, region_name: str | None, endpoint_url: str | None
+) -> Any:
+    module = cast(Any, import_module("langgraph_checkpoint_aws"))
+    DynamoDBSaver = module.DynamoDBSaver
+
+    return DynamoDBSaver(
+        table_name=table_name,
+        region_name=region_name,
+        endpoint_url=endpoint_url,
+    )
+
+
+def _resolve_dynamodb_config() -> tuple[str, str | None, str | None]:
+    table_name = os.getenv("LANGGRAPH_DYNAMODB_TABLE")
+    if not table_name:
+        raise ValueError("LANGGRAPH_DYNAMODB_TABLE is not set")
+    region_name = os.getenv("LANGGRAPH_DYNAMODB_REGION") or None
+    endpoint_url = os.getenv("LANGGRAPH_DYNAMODB_ENDPOINT_URL") or None
+    return table_name, region_name, endpoint_url
+
+
+def _get_dynamodb_graph(
+    table_name: str, region_name: str | None, endpoint_url: str | None
+) -> CompiledAgentGraph:
+    cache_key = (table_name, region_name or "", endpoint_url or "")
+    graph = _dynamodb_graph_cache.get(cache_key)
+    if graph is not None:
+        return graph
+
+    saver = _build_dynamodb_saver(
+        table_name=table_name,
+        region_name=region_name,
+        endpoint_url=endpoint_url,
+    )
+    graph = _build_graph().compile(checkpointer=saver)
+    _dynamodb_graph_cache[cache_key] = graph
+    return graph
+
+
+def _invoke_graph_with_dynamodb(input_state: AgentState, thread_id: str) -> AgentState:
+    table_name, region_name, endpoint_url = _resolve_dynamodb_config()
+    graph = _get_dynamodb_graph(table_name, region_name, endpoint_url)
+    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+    graph_any = cast(Any, graph)
+    output = graph_any.invoke(input_state, config=config)
+    return cast(AgentState, output)
 
 
 def _is_checkpoint_backend_error(error: Exception) -> bool:
@@ -498,7 +860,7 @@ def _normalize_payload(payload: AgentPayload) -> AgentInput:
     text = _coerce_str(payload.get("text") or payload.get("question"), "").strip()
     thread_id = _coerce_str(payload.get("thread_id") or _build_thread_id(payload))
     backend = _coerce_str(os.getenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory"), "memory").lower()
-    if backend not in {"memory", "postgres"}:
+    if backend not in {"memory", "postgres", "dynamodb"}:
         backend = "memory"
 
     thread_ts = _coerce_str(payload.get("thread_ts") or payload.get("message_ts"), "")
@@ -519,12 +881,6 @@ def _normalize_payload(payload: AgentPayload) -> AgentInput:
 
 
 def run_bigquery_agent(payload: AgentPayload) -> AgentResult:
-    """
-    Run LangGraph orchestration for BigQuery assistant flow.
-
-    This function is synchronous and can be called from runtime adapters
-    via `anyio.to_thread.run_sync`.
-    """
     input_data = _normalize_payload(payload)
 
     input_state: AgentState = {
@@ -545,15 +901,28 @@ def run_bigquery_agent(payload: AgentPayload) -> AgentResult:
         try:
             state = _invoke_graph_with_postgres(input_state, input_data.thread_id)
         except Exception as e:
-            if not _is_checkpoint_backend_error(e):
+            allow_memory_fallback = _env_truthy(
+                os.getenv("LANGGRAPH_POSTGRES_FALLBACK_TO_MEMORY"), False
+            )
+            if not allow_memory_fallback or not _is_checkpoint_backend_error(e):
                 raise
-            logger.warning("bigquery_agent.postgres_fallback_to_memory", extra={"error": str(e)})
+            logger.warning(
+                "bigquery_agent.postgres_fallback_to_memory",
+                extra={"error": str(e), "thread_id": input_data.thread_id},
+            )
             resolved_backend = "memory"
             state = _invoke_graph_with_memory(input_state, input_data.thread_id)
+    elif input_data.backend == "dynamodb":
+        state = _invoke_graph_with_dynamodb(input_state, input_data.thread_id)
     else:
         state = _invoke_graph_with_memory(input_state, input_data.thread_id)
 
     generation_result = state.get("generation_result") or {}
+    generation_result_meta = generation_result.get("meta")
+    generation_result["meta"] = (
+        generation_result_meta if isinstance(generation_result_meta, dict) else {}
+    )
+    generation_result["meta"]["routing"] = _build_routing_meta(state)
     response_text = state.get("response_text") or ""
     validation = state.get("dry_run") or generation_result.get("validation") or {}
 
@@ -568,4 +937,5 @@ def run_bigquery_agent(payload: AgentPayload) -> AgentResult:
         "execution": state.get("execution") or {},
         "generation_result": generation_result,
         "conversation_turns": len(state.get("conversation") or []),
+        "routing": _build_routing_meta(state),
     }

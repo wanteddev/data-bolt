@@ -67,6 +67,13 @@ fi
 ${AWS_CMD:-aws} ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY_HOST"
 docker push "$FULL"
 
+manifest_media_type=$(${AWS_CMD:-aws} ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" --region "$REGION" --query "imageDetails[0].imageManifestMediaType" --output text)
+if [[ "$manifest_media_type" == "application/vnd.oci.image.index.v1+json" || "$manifest_media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+  echo "Unsupported image manifest media type for Lambda: $manifest_media_type" >&2
+  echo "Run 'just build' with the updated build script (buildx --provenance=false --sbom=false --load)." >&2
+  exit 1
+fi
+
 digest=$(${AWS_CMD:-aws} ecr describe-images --repository-name "$REPO" --image-ids imageTag="$TAG" --region "$REGION" --query "imageDetails[0].imageDigest" --output text)
 if [[ -z "$digest" || "$digest" == "None" || "$digest" == "null" ]]; then
   echo "Failed to fetch image digest for tag $TAG" >&2
@@ -77,8 +84,45 @@ image_uri="${IMAGE_NAME}@${digest}"
 echo "Deploying $image_uri"
 
 PARAM_OVERRIDES="ImageUri=$image_uri"
-[[ -n "${SLACK_BOT_TOKEN:-}" ]] && PARAM_OVERRIDES="$PARAM_OVERRIDES SlackBotToken=$SLACK_BOT_TOKEN"
-[[ -n "${SLACK_SIGNING_SECRET:-}" ]] && PARAM_OVERRIDES="$PARAM_OVERRIDES SlackSigningSecret=$SLACK_SIGNING_SECRET"
+
+SLACK_BOT_TOKEN_SSM_PATH="${SLACK_BOT_TOKEN_SSM_PATH:-/data-bolt/slack/bot-token}"
+SLACK_SIGNING_SECRET_SSM_PATH="${SLACK_SIGNING_SECRET_SSM_PATH:-/data-bolt/slack/signing-secret}"
+
+if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
+  ${AWS_CMD:-aws} ssm put-parameter \
+    --name "$SLACK_BOT_TOKEN_SSM_PATH" \
+    --type SecureString \
+    --value "$SLACK_BOT_TOKEN" \
+    --overwrite \
+    --region "$REGION" >/dev/null
+  echo "Updated SSM SecureString: $SLACK_BOT_TOKEN_SSM_PATH"
+fi
+
+if [[ -n "${SLACK_SIGNING_SECRET:-}" ]]; then
+  ${AWS_CMD:-aws} ssm put-parameter \
+    --name "$SLACK_SIGNING_SECRET_SSM_PATH" \
+    --type SecureString \
+    --value "$SLACK_SIGNING_SECRET" \
+    --overwrite \
+    --region "$REGION" >/dev/null
+  echo "Updated SSM SecureString: $SLACK_SIGNING_SECRET_SSM_PATH"
+fi
+
+resolved_slack_bot_token=$(${AWS_CMD:-aws} ssm get-parameter --name "$SLACK_BOT_TOKEN_SSM_PATH" --with-decryption --region "$REGION" --query "Parameter.Value" --output text)
+resolved_slack_signing_secret=$(${AWS_CMD:-aws} ssm get-parameter --name "$SLACK_SIGNING_SECRET_SSM_PATH" --with-decryption --region "$REGION" --query "Parameter.Value" --output text)
+
+if [[ -z "$resolved_slack_bot_token" || "$resolved_slack_bot_token" == "None" ]]; then
+  echo "Failed to resolve Slack bot token from SSM path: $SLACK_BOT_TOKEN_SSM_PATH" >&2
+  exit 1
+fi
+if [[ -z "$resolved_slack_signing_secret" || "$resolved_slack_signing_secret" == "None" ]]; then
+  echo "Failed to resolve Slack signing secret from SSM path: $SLACK_SIGNING_SECRET_SSM_PATH" >&2
+  exit 1
+fi
+
+PARAM_OVERRIDES="$PARAM_OVERRIDES SlackBotToken=$resolved_slack_bot_token"
+PARAM_OVERRIDES="$PARAM_OVERRIDES SlackSigningSecret=$resolved_slack_signing_secret"
+[[ -n "${LANGGRAPH_CHECKPOINT_BACKEND:-}" ]] && PARAM_OVERRIDES="$PARAM_OVERRIDES LanggraphCheckpointBackend=$LANGGRAPH_CHECKPOINT_BACKEND"
 
 ${AWS_CMD:-aws} cloudformation deploy \
   --stack-name "$STACK" \

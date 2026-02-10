@@ -6,29 +6,76 @@ Parameters:
     Type: String
     Default: 216989105690.dkr.ecr.ap-northeast-2.amazonaws.com/sandbox:latest
     Description: Fully qualified ECR image reference used for both functions (tag or digest)
-  WebFunctionRoleArn:
-    Type: String
-    Default: arn:aws:iam::216989105690:role/sandbox-web-role
-    Description: ARN of the IAM execution role for the web Lambda function
-
-  SlackBgFunctionRoleArn:
-    Type: String
-    Default: arn:aws:iam::216989105690:role/sandbox-slack-bg-role
-    Description: ARN of the IAM execution role for the Slack background Lambda function
   SlackBotToken:
     Type: String
     NoEcho: true
-    Description: Slack Bot User OAuth Token (xoxb-...)
+    Description: Slack Bot User OAuth Token (resolved from SSM by deploy script)
   SlackSigningSecret:
     Type: String
     NoEcho: true
-    Description: Slack Signing Secret for request verification
+    Description: Slack Signing Secret (resolved from SSM by deploy script)
+  LanggraphCheckpointBackend:
+    Type: String
+    Default: memory
+    AllowedValues:
+      - memory
+      - postgres
+      - dynamodb
+    Description: Checkpoint backend for LangGraph runtime
 
 Resources:
+  WebFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  SlackBgFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  LangGraphCheckpointTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-langgraph-checkpoints"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   WebFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Role: !Ref WebFunctionRoleArn
+      Role: !GetAtt WebFunctionRole.Arn
       PackageType: Image
       Code:
         ImageUri: !Ref ImageUri
@@ -43,6 +90,9 @@ Resources:
           SLACK_BOT_TOKEN: !Ref SlackBotToken
           SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
           SLACK_BG_FUNCTION_NAME: !Ref SlackBgFunction
+          LANGGRAPH_CHECKPOINT_BACKEND: !Ref LanggraphCheckpointBackend
+          LANGGRAPH_DYNAMODB_TABLE: !Ref LangGraphCheckpointTable
+          LANGGRAPH_DYNAMODB_REGION: !Ref AWS::Region
 
   WebFunctionUrl:
     Type: AWS::Lambda::Url
@@ -70,7 +120,7 @@ Resources:
   SlackBgFunction:
     Type: AWS::Lambda::Function
     Properties:
-      Role: !Ref SlackBgFunctionRoleArn
+      Role: !GetAtt SlackBgFunctionRole.Arn
       PackageType: Image
       Code:
         ImageUri: !Ref ImageUri
@@ -84,6 +134,9 @@ Resources:
           AWS_LWA_PASS_THROUGH_PATH: "/slack/background"
           APP_MODE: "slack-bg"
           SLACK_BOT_TOKEN: !Ref SlackBotToken
+          LANGGRAPH_CHECKPOINT_BACKEND: !Ref LanggraphCheckpointBackend
+          LANGGRAPH_DYNAMODB_TABLE: !Ref LangGraphCheckpointTable
+          LANGGRAPH_DYNAMODB_REGION: !Ref AWS::Region
 
 Outputs:
   WebFunctionUrl:

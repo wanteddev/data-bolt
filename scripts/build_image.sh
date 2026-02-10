@@ -67,8 +67,11 @@ if [[ "$NO_DEFAULT_ATTESTATIONS" == "1" ]]; then
 fi
 
 build_cmd=(
-  docker build
+  docker buildx build
   --platform linux/arm64
+  --provenance=false
+  --sbom=false
+  --load
   --build-arg BUILDKIT_INLINE_CACHE=1
 )
 if ((${#cache_args[@]})); then

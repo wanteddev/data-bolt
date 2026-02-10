@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import re
 
-CHANNEL_KEYWORDS_DEFAULT = "bigquery,bq,sql,쿼리,빅쿼리,테이블,스키마,데이터,dry-run,dryrun"
+CHANNEL_KEYWORDS_DEFAULT = (
+    "bigquery,bq,sql,쿼리,빅쿼리,테이블,스키마,데이터,db,database,column,dry-run,dryrun"
+)
 
 
 def env_truthy(value: str | None, default: bool = False) -> bool:

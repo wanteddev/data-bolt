@@ -1,0 +1,19 @@
+[
+  {
+    "name": "greeting",
+    "text": "안녕하세요"
+  },
+  {
+    "name": "smalltalk",
+    "text": "오늘 날씨 어때?"
+  },
+  {
+    "name": "sql_gen",
+    "text": "지난주 가입자 수 쿼리 만들어줘"
+  },
+  {
+    "name": "sql_exec",
+    "text": "이 쿼리 실행해줘\n```sql\nSELECT 1 AS value;\n```"
+  }
+]
+

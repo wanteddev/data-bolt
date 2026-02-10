@@ -6,8 +6,12 @@
 # Required: Slack Credentials
 # Get these from https://api.slack.com/apps > Your App > Basic Information
 # =============================================================================
+# Local 개발/시뮬레이션 또는 `just sync-secrets` 실행 시 사용됩니다.
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_SIGNING_SECRET=your-signing-secret
+# (선택) SSM 파라미터 경로 오버라이드
+# SLACK_BOT_TOKEN_SSM_PATH=/data-bolt/slack/bot-token
+# SLACK_SIGNING_SECRET_SSM_PATH=/data-bolt/slack/signing-secret
 
 # =============================================================================
 # Optional: AWS Configuration (defaults are set in justfile)
@@ -34,11 +38,32 @@ SLACK_SIGNING_SECRET=your-signing-secret
 # =============================================================================
 # Optional: LangGraph / BigQuery Agent Settings
 # =============================================================================
-# LAMBDA_LANGGRAPH_CHECKPOINT_BACKEND=memory
+# LAMBDA_LANGGRAPH_CHECKPOINT_BACKEND=dynamodb
 # LAMBDA_LANGGRAPH_POSTGRES_URI=postgresql://user@localhost:5432/postgres
+# LAMBDA_LANGGRAPH_DYNAMODB_TABLE=data-bolt-langgraph-checkpoints
+# LAMBDA_LANGGRAPH_DYNAMODB_REGION=ap-northeast-2
+# LAMBDA_LANGGRAPH_DYNAMODB_ENDPOINT_URL=http://localhost:4566
 # LAMBDA_SLACK_CHANNEL_AUTO_REPLY=true
 # LAMBDA_SLACK_CHANNEL_AUTO_REPLY_ALLOWLIST=C01234567,C08999999
 # LAMBDA_SLACK_CHANNEL_AUTO_REPLY_KEYWORDS=bigquery,bq,sql,쿼리,빅쿼리,테이블,스키마,데이터
 # LAMBDA_SLACK_CHANNEL_AUTO_REPLY_IN_THREADS=true
 # LAMBDA_BIGQUERY_MAX_BYTES_BILLED=0
-# LAMBDA_BIGQUERY_EXECUTE_URL=https://your-executor.example.com/query
+# LAMBDA_BIGQUERY_PROJECT_ID=your-gcp-project-id
+# LAMBDA_BIGQUERY_LOCATION=US
+# LAMBDA_BIGQUERY_QUERY_TIMEOUT_SECONDS=120
+# LAMBDA_BIGQUERY_INTENT_LLM_ENABLED=true
+# LAMBDA_BIGQUERY_INTENT_CONFIDENCE_THRESHOLD=0.55
+# LAMBDA_BIGQUERY_CHAT_PLANNER_MAX_ACTIONS=2
+# LAMBDA_BIGQUERY_CHAT_ALLOW_EXECUTE_IN_CHAT=false
+# LAMBDA_LLM_PROVIDER=anthropic_compatible
+# LAMBDA_LLM_ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+# LAMBDA_LLM_ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+# LAMBDA_LLM_ANTHROPIC_API_KEY=your-anthropic-compatible-key
+# LAMBDA_LLM_OPENAI_BASE_URL=https://api.example.com/v1
+# LAMBDA_LLM_OPENAI_MODEL=glm-4.7
+# LAMBDA_LLM_OPENAI_API_KEY=your-openai-compatible-key
+# LAMBDA_LLM_TIMEOUT_SECONDS=60
+# LAMBDA_LLM_TIMEOUT_INTENT_SECONDS=45
+# LAMBDA_LLM_TIMEOUT_CHAT_PLANNER_SECONDS=45
+# LAMBDA_LLM_TIMEOUT_GENERATION_SECONDS=60
+# LAMBDA_LLM_TIMEOUT_REFINE_SECONDS=60

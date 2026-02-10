@@ -48,6 +48,6 @@ serve:
 sync-env:
   {{uv}} run python scripts/sync_env.py
 
-[doc("Create required IAM roles (run once before first deploy)")]
-create-roles:
-  AWS_REGION={{aws_region}} AWS_ACCOUNT_ID={{env('AWS_ACCOUNT_ID', '{{ aws_account_id }}')}} STACK_NAME={{stack_name}} AWS_CMD={{aws}} scripts/create_roles.sh
+[doc("Sync Slack secrets from .env to SSM SecureString parameters")]
+sync-secrets env_file=".env":
+  AWS_PROFILE={{aws_profile}} AWS_REGION={{aws_region}} AWS_CMD={{aws}} scripts/sync_secrets_to_ssm.sh {{env_file}}

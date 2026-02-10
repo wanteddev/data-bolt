@@ -13,8 +13,7 @@ WORKDIR /var/task
 # Copy project metadata and install dependencies using the lockfile for reproducibility
 COPY pyproject.toml ./
 COPY README.md ./README.md
-COPY requirements.lock ./requirements.lock
-RUN cp requirements.lock uv.lock
+COPY uv.lock ./uv.lock
 
 # Copy application source (editable install target)
 COPY src/ ./src

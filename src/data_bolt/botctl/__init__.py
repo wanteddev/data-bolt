@@ -1,0 +1,1 @@
+"""botctl CLI package."""

@@ -10,8 +10,10 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import httpx
+from google.api_core.exceptions import BadRequest, GoogleAPICallError
 
 if TYPE_CHECKING:
+    from google.cloud.bigquery import Client as BigQueryClient
     from mypy_boto3_ssm import SSMClient
 
 JsonValue = dict[str, Any] | list[Any]
@@ -23,6 +25,16 @@ LAAS_EMPTY_PRESET_HASH = "2e1cfa82b035c26cbbbdae632cea070514eb8b773f616aaeaf668e
 LAAS_API_KEY_SSM_PARAM = "/DATA/PIPELINE/API_KEY/OPENAI"
 LAAS_RAG_SCHEMA_COLLECTION = "RAG_DATA_CATALOG"
 LAAS_RAG_GLOSSARY_COLLECTION = "RAG_GLOSSARY"
+LLM_PROVIDER_DEFAULT = "laas"
+LLM_PROVIDER_LAAS = "laas"
+LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+LLM_PROVIDER_ANTHROPIC_COMPATIBLE = "anthropic_compatible"
+OPENAI_COMPATIBLE_DEFAULT_MODEL = "glm-4.7"
+ANTHROPIC_COMPATIBLE_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+LLM_TIMEOUT_SECONDS_DEFAULT = 60.0
+LLM_TIMEOUT_INTENT_SECONDS_DEFAULT = 45.0
+LLM_TIMEOUT_CHAT_PLANNER_SECONDS_DEFAULT = 45.0
+LLM_TIMEOUT_REFINE_SECONDS_DEFAULT = 60.0
 BIGQUERY_ON_DEMAND_USD_PER_TB = float(os.getenv("BIGQUERY_ON_DEMAND_USD_PER_TB", "5"))
 
 
@@ -106,19 +118,6 @@ def _get_refine_attempts() -> int:
         return 1
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(url, json=payload)
-        resp.raise_for_status()
-        try:
-            data = resp.json()
-            if isinstance(data, dict):
-                return data
-            return {"content": data}
-        except Exception:
-            return {"content": resp.text}
-
-
 def _coerce_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -141,6 +140,23 @@ def estimate_query_cost_usd(
 
 
 def _build_instruction_block(instruction_type: str) -> str:
+    if instruction_type == "general_chat":
+        return (
+            """
+[Directive]
+너는 Slack에서 대화를 돕는 친절한 데이터 동료다.
+일상 대화에는 자연스럽게 답하고, 데이터/쿼리 요청이 나오면 필요한 조건을 짧게 확인해라.
+사실을 추정해 단정하지 말고, 모르면 모른다고 말하라.
+
+출력은 반드시 아래 JSON 스키마를 따를 것:
+{
+  "sql": "",
+  "explanation": "<자연스러운 한국어 대화 응답>",
+  "assumptions": [],
+  "validation_steps": []
+}
+            """
+        ).strip()
     if instruction_type == "bigquery_sql_generation":
         return (
             """
@@ -285,6 +301,7 @@ class _SSMParameterLoader:
 
 
 _ssm_loader = _SSMParameterLoader()
+_bigquery_client: BigQueryClient | None = None
 
 
 def _get_laas_api_key() -> str:
@@ -293,6 +310,149 @@ def _get_laas_api_key() -> str:
         return env_key
     param_key = os.getenv("LAAS_API_KEY_SSM_PARAM", LAAS_API_KEY_SSM_PARAM)
     return _ssm_loader.get_parameter(param_key, True)
+
+
+def _get_llm_provider() -> str:
+    provider = os.getenv("LLM_PROVIDER", LLM_PROVIDER_DEFAULT).strip().lower()
+    if provider in {
+        LLM_PROVIDER_LAAS,
+        LLM_PROVIDER_OPENAI_COMPATIBLE,
+        LLM_PROVIDER_ANTHROPIC_COMPATIBLE,
+    }:
+        return provider
+    return LLM_PROVIDER_DEFAULT
+
+
+def _get_openai_compatible_api_key() -> str:
+    value = os.getenv("LLM_OPENAI_API_KEY", "").strip()
+    if value:
+        return value
+    raise ValueError("LLM_OPENAI_API_KEY is required when LLM_PROVIDER=openai_compatible")
+
+
+def _get_openai_compatible_base_url() -> str:
+    value = os.getenv("LLM_OPENAI_BASE_URL", "").strip().rstrip("/")
+    if value:
+        return value
+    raise ValueError("LLM_OPENAI_BASE_URL is required when LLM_PROVIDER=openai_compatible")
+
+
+def _get_openai_compatible_model() -> str:
+    model = os.getenv("LLM_OPENAI_MODEL", OPENAI_COMPATIBLE_DEFAULT_MODEL).strip()
+    return model or OPENAI_COMPATIBLE_DEFAULT_MODEL
+
+
+def _get_anthropic_compatible_api_key() -> str:
+    value = os.getenv("LLM_ANTHROPIC_API_KEY", "").strip()
+    if value:
+        return value
+    raise ValueError("LLM_ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic_compatible")
+
+
+def _get_anthropic_compatible_base_url() -> str:
+    value = os.getenv("LLM_ANTHROPIC_BASE_URL", "").strip().rstrip("/")
+    if value:
+        return value
+    raise ValueError("LLM_ANTHROPIC_BASE_URL is required when LLM_PROVIDER=anthropic_compatible")
+
+
+def _get_anthropic_compatible_model() -> str:
+    model = os.getenv("LLM_ANTHROPIC_MODEL", ANTHROPIC_COMPATIBLE_DEFAULT_MODEL).strip()
+    return model or ANTHROPIC_COMPATIBLE_DEFAULT_MODEL
+
+
+def _read_timeout_env(var_name: str, default: float) -> float:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _read_timeout_env_optional(var_name: str) -> float | None:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return None
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _get_llm_timeout_seconds(use_case: str) -> float:
+    common = _read_timeout_env_optional("LLM_TIMEOUT_SECONDS")
+    if use_case == "intent":
+        specific = _read_timeout_env_optional("LLM_TIMEOUT_INTENT_SECONDS")
+        return specific if specific is not None else common or LLM_TIMEOUT_INTENT_SECONDS_DEFAULT
+    if use_case == "planner":
+        specific = _read_timeout_env_optional("LLM_TIMEOUT_CHAT_PLANNER_SECONDS")
+        return (
+            specific if specific is not None else common or LLM_TIMEOUT_CHAT_PLANNER_SECONDS_DEFAULT
+        )
+    if use_case == "refine":
+        specific = _read_timeout_env_optional("LLM_TIMEOUT_REFINE_SECONDS")
+        return specific if specific is not None else common or LLM_TIMEOUT_REFINE_SECONDS_DEFAULT
+    specific = _read_timeout_env_optional("LLM_TIMEOUT_GENERATION_SECONDS")
+    return specific if specific is not None else common or LLM_TIMEOUT_SECONDS_DEFAULT
+
+
+def _get_bigquery_client() -> BigQueryClient:
+    global _bigquery_client
+    if _bigquery_client is None:
+        from google.cloud import bigquery
+
+        project = os.getenv("BIGQUERY_PROJECT_ID") or None
+        location = os.getenv("BIGQUERY_LOCATION") or None
+        if location:
+            _bigquery_client = bigquery.Client(project=project, location=location)
+        else:
+            _bigquery_client = bigquery.Client(project=project)
+    return _bigquery_client
+
+
+def _get_bigquery_location() -> str | None:
+    value = os.getenv("BIGQUERY_LOCATION")
+    if value and value.strip():
+        return value.strip()
+    return None
+
+
+def _get_query_timeout_seconds() -> float:
+    raw = os.getenv("BIGQUERY_QUERY_TIMEOUT_SECONDS", "120")
+    try:
+        timeout = float(raw)
+    except ValueError:
+        timeout = 120.0
+    return timeout if timeout > 0 else 120.0
+
+
+def _get_max_bytes_billed() -> int | None:
+    raw = os.getenv("BIGQUERY_MAX_BYTES_BILLED", "0").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _format_bigquery_error(error: Exception) -> str:
+    if isinstance(error, BadRequest):
+        errors = getattr(error, "errors", None)
+        if isinstance(errors, list) and errors:
+            first = errors[0] if isinstance(errors[0], dict) else {}
+            message = first.get("message")
+            if isinstance(message, str) and message.strip():
+                return message
+        if str(error).strip():
+            return str(error)
+        return "BigQuery dry-run failed with bad request."
+    if isinstance(error, GoogleAPICallError) and str(error).strip():
+        return str(error)
+    return str(error) if str(error).strip() else "Unknown BigQuery error"
 
 
 def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> JsonValue:
@@ -312,6 +472,92 @@ def _laas_post(path: str, payload: dict[str, Any], timeout: float) -> JsonValue:
         if isinstance(data, (dict, list)):
             return data
         return {"content": data}
+
+
+def _openai_compatible_post(path: str, payload: dict[str, Any], timeout: float) -> JsonValue:
+    base_url = _get_openai_compatible_base_url()
+    api_key = _get_openai_compatible_api_key()
+
+    url = f"{base_url}{path}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, (dict, list)):
+            return data
+        return {"content": data}
+
+
+def _anthropic_compatible_post(path: str, payload: dict[str, Any], timeout: float) -> JsonValue:
+    base_url = _get_anthropic_compatible_base_url()
+    api_key = _get_anthropic_compatible_api_key()
+
+    url = f"{base_url}{path}"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, (dict, list)):
+            return data
+        return {"content": data}
+
+
+def _to_anthropic_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    system_parts: list[str] = []
+    out_messages: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role == "system":
+            text = _extract_text_content(content)
+            if text:
+                system_parts.append(text)
+            continue
+        if role not in {"user", "assistant"}:
+            continue
+        text = _extract_text_content(content)
+        if not text:
+            continue
+        out_messages.append({"role": role, "content": text})
+    return ("\n\n".join(system_parts) if system_parts else None), out_messages
+
+
+def _llm_chat_completion(
+    *,
+    messages: list[dict[str, Any]],
+    timeout: float,
+) -> JsonValue:
+    provider = _get_llm_provider()
+    if provider == LLM_PROVIDER_ANTHROPIC_COMPATIBLE:
+        system, anthropic_messages = _to_anthropic_messages(messages)
+        payload: dict[str, Any] = {
+            "model": _get_anthropic_compatible_model(),
+            "max_tokens": int(os.getenv("LLM_ANTHROPIC_MAX_TOKENS", "4096")),
+            "messages": anthropic_messages or [{"role": "user", "content": ""}],
+        }
+        if system:
+            payload["system"] = system
+        return _anthropic_compatible_post("/v1/messages", payload, timeout=timeout)
+    if provider == LLM_PROVIDER_OPENAI_COMPATIBLE:
+        payload = {
+            "model": _get_openai_compatible_model(),
+            "messages": messages,
+        }
+        return _openai_compatible_post("/chat/completions", payload, timeout=timeout)
+
+    payload = {"hash": LAAS_EMPTY_PRESET_HASH, "messages": messages}
+    return _laas_post("/api/preset/v2/chat/completions", payload, timeout=timeout)
 
 
 def _vector_search(
@@ -352,7 +598,7 @@ def _join_doc_texts(docs: list[dict[str, Any]]) -> str:
     return "\n".join(texts)
 
 
-def _collect_rag_context(question: str) -> dict[str, str]:
+def _collect_rag_context(question: str) -> dict[str, Any]:
     schema_collection = os.getenv("LAAS_RAG_SCHEMA_COLLECTION", LAAS_RAG_SCHEMA_COLLECTION)
     glossary_collection = os.getenv("LAAS_RAG_GLOSSARY_COLLECTION", LAAS_RAG_GLOSSARY_COLLECTION)
     schema_limit = int(os.getenv("LAAS_RAG_SCHEMA_LIMIT", "64"))
@@ -373,9 +619,21 @@ def _collect_rag_context(question: str) -> dict[str, str]:
         min_score=glossary_min_score,
     )
 
+    table_info = _join_doc_texts(schema_docs)
+    glossary_info = _join_doc_texts(glossary_docs)
+
     return {
-        "table_info": _join_doc_texts(schema_docs),
-        "glossary_info": _join_doc_texts(glossary_docs),
+        "table_info": table_info,
+        "glossary_info": glossary_info,
+        "meta": {
+            "attempted": True,
+            "schema_collection": schema_collection,
+            "glossary_collection": glossary_collection,
+            "schema_docs": len(schema_docs),
+            "glossary_docs": len(glossary_docs),
+            "table_info_chars": len(table_info),
+            "glossary_info_chars": len(glossary_info),
+        },
     }
 
 
@@ -396,9 +654,125 @@ def generate_bigquery_response(
         images=images,
         instruction_type=instruction_type,
     )
-    payload = {"hash": LAAS_EMPTY_PRESET_HASH, "messages": messages}
-    resp = _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
+    resp = _llm_chat_completion(
+        messages=messages,
+        timeout=_get_llm_timeout_seconds("generation"),
+    )
     return resp if isinstance(resp, dict) else {"choices": []}
+
+
+def classify_intent_with_laas(
+    *,
+    text: str,
+    history: list[dict[str, Any]] | None,
+    channel_type: str,
+    is_mention: bool,
+    is_thread_followup: bool,
+) -> dict[str, Any]:
+    clip_limit = int(os.getenv("BIGQUERY_HISTORY_CLIP_LIMIT", "6"))
+    normalized_history = _clip_history(history, clip_limit)
+    system_prompt = (
+        """
+너는 라우팅 전용 분류기다. SQL 생성/실행은 절대 하지 말고 오직 JSON만 반환하라.
+
+반드시 아래 스키마로 응답:
+{
+  "intent": "data_workflow | free_chat",
+  "confidence": 0.0,
+  "reason": "짧은 근거",
+  "actions": ["text_to_sql" | "validate_sql" | "execute_sql" | "schema_lookup" | "analysis_followup" | "none"]
+}
+
+규칙:
+- 데이터 조회/집계/스키마/쿼리 생성·검증·실행 요청이면 intent=data_workflow
+- 일반 대화/메타 질문이면 intent=free_chat
+- 불확실하면 intent=free_chat, confidence를 낮게
+- actions는 intent에 맞게 1~2개, 해당 없으면 ["none"]
+        """
+    ).strip()
+    user_prompt = (
+        f"""
+[Channel Meta]
+- channel_type: {channel_type}
+- is_mention: {is_mention}
+- is_thread_followup: {is_thread_followup}
+
+[History]
+{json.dumps(normalized_history, ensure_ascii=False)}
+
+[User]
+{text}
+        """
+    ).strip()
+    resp = _llm_chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        timeout=_get_llm_timeout_seconds("intent"),
+    )
+    if not isinstance(resp, dict):
+        return {}
+    content = _extract_primary_text(resp)
+    parsed = _parse_json_response(content)
+    if not parsed:
+        parsed = _parse_json_response(_extract_text_content(content) or "")
+    return parsed
+
+
+def plan_free_chat_with_laas(
+    *,
+    text: str,
+    history: list[dict[str, Any]] | None,
+    allow_execute_in_chat: bool,
+    max_actions: int,
+) -> dict[str, Any]:
+    clip_limit = int(os.getenv("BIGQUERY_HISTORY_CLIP_LIMIT", "6"))
+    normalized_history = _clip_history(history, clip_limit)
+    system_prompt = (
+        """
+너는 자유 대화 planner다. 대화 응답을 만들고 필요할 때만 액션을 제안하라.
+반드시 JSON만 응답하고 스키마를 준수하라.
+
+{
+  "assistant_response": "자연스러운 한국어 답변",
+  "actions": ["text_to_sql" | "validate_sql" | "execute_sql" | "schema_lookup" | "analysis_followup" | "none"],
+  "action_reason": "액션 선택 근거"
+}
+
+규칙:
+- 액션은 최대 지정 개수만 반환.
+- 실행 액션은 정책상 허용될 때만 추천.
+- 데이터 작업이 필요 없으면 actions=["none"].
+        """
+    ).strip()
+    user_prompt = (
+        f"""
+[Policy]
+- allow_execute_in_chat: {allow_execute_in_chat}
+- max_actions: {max_actions}
+
+[History]
+{json.dumps(normalized_history, ensure_ascii=False)}
+
+[User]
+{text}
+        """
+    ).strip()
+    resp = _llm_chat_completion(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        timeout=_get_llm_timeout_seconds("planner"),
+    )
+    if not isinstance(resp, dict):
+        return {}
+    content = _extract_primary_text(resp)
+    parsed = _parse_json_response(content)
+    if not parsed:
+        parsed = _parse_json_response(_extract_text_content(content) or "")
+    return parsed
 
 
 def refine_bigquery_sql(
@@ -456,20 +830,15 @@ def refine_bigquery_sql(
 {error if error else ""}
         """
     ).strip()
-    payload = {
-        "hash": LAAS_EMPTY_PRESET_HASH,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
     try:
-        resp = _laas_post("/api/preset/v2/chat/completions", payload, timeout=60.0)
-        content = (
-            (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            if isinstance(resp, dict)
-            else ""
+        resp = _llm_chat_completion(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            timeout=_get_llm_timeout_seconds("refine"),
         )
+        content = _extract_primary_text(resp) if isinstance(resp, dict) else ""
         parsed = _parse_json_response(content)
         sql = parsed.get("sql")
         return sql if isinstance(sql, str) else ""
@@ -478,26 +847,42 @@ def refine_bigquery_sql(
 
 
 def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
-    url = os.getenv("BIGQUERY_DRYRUN_URL")
-    if not url:
-        return False, {"error": "BIGQUERY_DRYRUN_URL is not set"}
+    if not sql or not sql.strip():
+        return False, {"error": "SQL is empty"}
 
-    payload = {"sql": sql, "dry_run": True}
     try:
-        resp = _post_json(url, payload, timeout=30.0)
-        ok = resp.get("success")
-        if ok is None:
-            ok = resp.get("ok")
-        if ok is None:
-            ok = "error" not in resp
-        return bool(ok), {
-            "total_bytes_processed": resp.get("total_bytes_processed"),
-            "job_id": resp.get("job_id"),
-            "cache_hit": resp.get("cache_hit"),
-            "error": resp.get("error"),
+        from google.cloud import bigquery
+
+        client = _get_bigquery_client()
+        config = bigquery.QueryJobConfig(
+            dry_run=True,
+            use_query_cache=False,
+            use_legacy_sql=False,
+        )
+        max_bytes = _get_max_bytes_billed()
+        if max_bytes is not None:
+            config.maximum_bytes_billed = max_bytes
+        query_job = client.query(
+            sql,
+            job_config=config,
+            location=_get_bigquery_location(),
+        )
+        if query_job.errors:
+            first_error = query_job.errors[0] if query_job.errors else {}
+            error_text = (
+                str(first_error.get("message"))
+                if isinstance(first_error, dict) and first_error.get("message")
+                else "BigQuery dry-run returned errors"
+            )
+            return False, {"error": error_text}
+        return True, {
+            "total_bytes_processed": query_job.total_bytes_processed,
+            "job_id": query_job.job_id,
+            "cache_hit": query_job.cache_hit,
+            "error": None,
         }
     except Exception as e:
-        return False, {"error": str(e)}
+        return False, {"error": _format_bigquery_error(e)}
 
 
 def dry_run_bigquery_sql(sql: str) -> dict[str, Any]:
@@ -514,39 +899,43 @@ def dry_run_bigquery_sql(sql: str) -> dict[str, Any]:
 
 
 def execute_bigquery_sql(sql: str) -> dict[str, Any]:
-    url = os.getenv("BIGQUERY_EXECUTE_URL")
-    if not url:
-        return {
-            "success": False,
-            "error": "BIGQUERY_EXECUTE_URL is not set",
-            "job_id": None,
-            "row_count": None,
-            "preview_rows": [],
-        }
-
-    payload = {"sql": sql, "dry_run": False}
     try:
-        resp = _post_json(url, payload, timeout=60.0)
-        success = resp.get("success")
-        if success is None:
-            success = resp.get("ok")
-        if success is None:
-            success = "error" not in resp
+        from google.cloud import bigquery
 
-        rows = resp.get("rows") or resp.get("data") or []
-        preview_rows = rows[: int(os.getenv("BIGQUERY_RESULT_PREVIEW_ROWS", "20"))] if rows else []
+        client = _get_bigquery_client()
+        config = bigquery.QueryJobConfig(use_legacy_sql=False)
+        max_bytes = _get_max_bytes_billed()
+        if max_bytes is not None:
+            config.maximum_bytes_billed = max_bytes
+        query_job = client.query(
+            sql,
+            job_config=config,
+            location=_get_bigquery_location(),
+        )
+        iterator = query_job.result(timeout=_get_query_timeout_seconds())
+        preview_limit = int(os.getenv("BIGQUERY_RESULT_PREVIEW_ROWS", "20"))
+        preview_rows: list[dict[str, Any]] = []
+        for index, row in enumerate(iterator):
+            if index < preview_limit:
+                preview_rows.append(dict(row.items()))
+            else:
+                break
+
+        row_count = iterator.total_rows
+        if row_count is None:
+            row_count = query_job.num_dml_affected_rows
 
         return {
-            "success": bool(success),
-            "error": resp.get("error"),
-            "job_id": resp.get("job_id"),
-            "row_count": resp.get("row_count") or (len(rows) if isinstance(rows, list) else None),
-            "preview_rows": preview_rows if isinstance(preview_rows, list) else [],
+            "success": True,
+            "error": None,
+            "job_id": query_job.job_id,
+            "row_count": row_count,
+            "preview_rows": preview_rows,
         }
     except Exception as e:
         return {
             "success": False,
-            "error": str(e),
+            "error": _format_bigquery_error(e),
             "job_id": None,
             "row_count": None,
             "preview_rows": [],
@@ -562,6 +951,21 @@ def _extract_sql_from_response(resp: JsonValue) -> tuple[str | None, str | None]
     contents = _collect_candidate_contents(resp)
     for content in contents:
         parsed = _parse_json_response(content)
+        if parsed and "sql" in parsed:
+            parsed_sql = parsed.get("sql")
+            parsed_explanation = parsed.get("explanation")
+            resolved_explanation = (
+                parsed_explanation
+                if isinstance(parsed_explanation, str)
+                else explanation
+                if isinstance(explanation, str)
+                else None
+            )
+            if isinstance(parsed_sql, str):
+                normalized_sql = parsed_sql.strip()
+                return (normalized_sql or None), resolved_explanation
+            return None, resolved_explanation
+
         parsed_sql = parsed.get("sql")
         parsed_explanation = parsed.get("explanation")
         if isinstance(parsed_sql, str) and parsed_sql.strip():
@@ -646,7 +1050,23 @@ def _collect_candidate_contents(resp: JsonValue) -> list[str]:
     return candidates
 
 
-def adapt_laas_response_for_agent(raw_resp: JsonValue, instruction_type: str) -> dict[str, Any]:
+def _extract_primary_text(resp: dict[str, Any]) -> str:
+    contents = _collect_candidate_contents(resp)
+    return contents[0] if contents else ""
+
+
+def _extract_llm_model(raw_resp: JsonValue, provider: str) -> str:
+    if not isinstance(raw_resp, dict):
+        return ""
+    model = raw_resp.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    if provider == LLM_PROVIDER_OPENAI_COMPATIBLE:
+        return _get_openai_compatible_model()
+    return ""
+
+
+def adapt_llm_response_for_agent(raw_resp: JsonValue, instruction_type: str) -> dict[str, Any]:
     sql, explanation = _extract_sql_from_response(raw_resp)
     return {
         "choices": [{"message": {"content": (sql or "").strip()}}],
@@ -659,19 +1079,24 @@ def adapt_laas_response_for_agent(raw_resp: JsonValue, instruction_type: str) ->
     }
 
 
+def adapt_laas_response_for_agent(raw_resp: JsonValue, instruction_type: str) -> dict[str, Any]:
+    return adapt_llm_response_for_agent(raw_resp, instruction_type)
+
+
 def _parse_json_response(content: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+    candidates = [content]
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", content, re.S | re.I)
+    if fenced_match:
+        candidates.append(fenced_match.group(1))
 
-
-def _validation_enabled() -> bool:
-    env = os.getenv("ENABLE_BIGQUERY_DRYRUN_VALIDATION")
-    if not _env_truthy(env, True):
-        return False
-    return bool(os.getenv("BIGQUERY_DRYRUN_URL"))
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+    return {}
 
 
 def _validate_with_refine(
@@ -753,15 +1178,26 @@ def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
     glossary_info = payload.get("glossary_info", "")
     history = payload.get("history") or []
     images = payload.get("images") or []
+    raw_instruction_type = payload.get("instruction_type")
+    instruction_type = (
+        raw_instruction_type
+        if isinstance(raw_instruction_type, str) and raw_instruction_type.strip()
+        else _classify_instruction_type(question, history)
+    )
+    rag_meta: dict[str, Any] = {"attempted": False}
+    context_source = "provided"
+    provider = _get_llm_provider()
 
-    if question and (not table_info or not glossary_info):
+    should_collect_rag = instruction_type != "general_chat"
+    if should_collect_rag and question and (not table_info or not glossary_info):
         rag_ctx = _collect_rag_context(question)
+        rag_meta_raw = rag_ctx.get("meta")
+        rag_meta = rag_meta_raw if isinstance(rag_meta_raw, dict) else {"attempted": True}
+        context_source = "rag"
         if not table_info:
             table_info = rag_ctx.get("table_info", "")
         if not glossary_info:
             glossary_info = rag_ctx.get("glossary_info", "")
-
-    instruction_type = _classify_instruction_type(question, history)
     try:
         raw_resp = generate_bigquery_response(
             question=question,
@@ -773,13 +1209,36 @@ def build_bigquery_sql(payload: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception as e:
         logger.error("bigquery_sql.generate_failed", extra={"error": str(e)})
-        return {"error": str(e)}
+        llm_meta = {"provider": provider, "called": True, "success": False, "error": str(e)}
+        return {
+            "error": str(e),
+            "meta": {
+                "instruction_type": instruction_type,
+                "context_source": context_source,
+                "rag": rag_meta,
+                "llm": llm_meta,
+                "laas": llm_meta if provider == LLM_PROVIDER_LAAS else {"called": False},
+            },
+        }
 
-    response = adapt_laas_response_for_agent(raw_resp, instruction_type)
+    response = adapt_llm_response_for_agent(raw_resp, instruction_type)
+    llm_meta = {
+        "provider": provider,
+        "called": True,
+        "success": True,
+        "model": _extract_llm_model(raw_resp, provider),
+    }
+    response["meta"] = {
+        "instruction_type": instruction_type,
+        "context_source": context_source,
+        "rag": rag_meta,
+        "llm": llm_meta,
+        "laas": llm_meta if provider == LLM_PROVIDER_LAAS else {"called": False},
+    }
     answer_structured = response.get("answer_structured")
     sql = answer_structured.get("sql") if isinstance(answer_structured, dict) else None
 
-    if isinstance(sql, str) and sql and _validation_enabled():
+    if isinstance(sql, str) and sql:
         validation = _validate_with_refine(
             question=question,
             ddl_context=table_info,
