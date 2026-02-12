@@ -42,6 +42,7 @@ def _default_plan_turn_action(**kwargs):
 @pytest.fixture(autouse=True)
 def _default_env(monkeypatch):
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
+    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "graph")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_ACTION_ROUTER_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_CHAT_ALLOW_EXECUTE_IN_CHAT", "false")
@@ -55,6 +56,11 @@ def _default_env(monkeypatch):
     bigquery_agent._postgres_context_cache.clear()
     bigquery_agent._postgres_setup_done.clear()
     bigquery_agent._dynamodb_graph_cache.clear()
+    bigquery_agent._loop_memory_runtime_cache.clear()
+    bigquery_agent._loop_postgres_graph_cache.clear()
+    bigquery_agent._loop_postgres_context_cache.clear()
+    bigquery_agent._loop_postgres_setup_done.clear()
+    bigquery_agent._loop_dynamodb_graph_cache.clear()
 
 
 def test_run_bigquery_agent_ignores_irrelevant_channel_message() -> None:
@@ -1150,3 +1156,100 @@ def test_run_bigquery_agent_persists_state_with_postgres(monkeypatch) -> None:
     )
 
     assert second["conversation_turns"] > first["conversation_turns"]
+
+
+def test_run_bigquery_agent_loop_mode_executes_low_cost_sql(monkeypatch) -> None:
+    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "loop")
+    monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "sql_execute",
+            "confidence": 0.9,
+            "reason": "execute request",
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
+        "dry_run_bigquery_sql",
+        lambda _sql: {
+            "success": True,
+            "sql": "SELECT 1 AS value;",
+            "total_bytes_processed": 10,
+            "estimated_cost_usd": 0.01,
+        },
+    )
+
+    executed: dict[str, str] = {}
+    monkeypatch.setattr(
+        bigquery_agent,
+        "execute_bigquery_sql",
+        lambda sql: (
+            executed.setdefault("sql", sql)
+            and {
+                "success": True,
+                "job_id": "job-loop-1",
+                "row_count": 1,
+                "preview_rows": [{"v": 1}],
+            }
+        ),
+    )
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D9",
+            "thread_ts": "101.1",
+            "channel_type": "im",
+            "text": "이 쿼리 실행해줘\n```sql\nSELECT 1 AS value;\n```",
+        }
+    )
+
+    assert result["routing"]["runtime_mode"] == "loop"
+    assert result["execution"]["success"] is True
+    assert executed["sql"] == "SELECT 1 AS value;"
+
+
+def test_run_bigquery_agent_loop_mode_requires_approval_for_high_cost(monkeypatch) -> None:
+    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "loop")
+    monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "sql_execute",
+            "confidence": 0.9,
+            "reason": "execute request",
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
+        "dry_run_bigquery_sql",
+        lambda _sql: {
+            "success": True,
+            "sql": "SELECT 1 AS value;",
+            "total_bytes_processed": 10,
+            "estimated_cost_usd": 2.0,
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
+        "execute_bigquery_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("execute should not be called")),
+    )
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D9",
+            "thread_ts": "101.2",
+            "channel_type": "im",
+            "text": "이 쿼리 실행해줘\n```sql\nSELECT 1 AS value;\n```",
+        }
+    )
+
+    assert result["routing"]["runtime_mode"] == "loop"
+    assert result["execution"]["success"] is False
+    assert result["routing"]["execution_policy"] == "approval_required"
+    assert "실행 승인" in result["execution"]["error"]

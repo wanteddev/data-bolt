@@ -74,6 +74,7 @@ class AgentInput:
 
 
 class AgentState(TypedDict, total=False):
+    runtime_mode: str
     text: str
     channel_type: str
     is_mention: bool

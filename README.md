@@ -59,6 +59,23 @@ uv run botctl chat --thread-ts demo-thread
 - `dynamodb` backend에서 체크포인트 저장소 오류가 발생하면 fallback 없이 즉시 실패합니다 (fail-fast).
 - `botctl simulate --thread-ts ...`는 memory backend에서 거부됩니다.
 
+### 2-2. LangGraph Dev 서버로 그래프 테스트
+
+`langgraph-cli`를 사용하면 그래프를 API/Studio로 직접 테스트할 수 있습니다.
+
+```bash
+uv sync --frozen
+just langgraph-dev
+# 또는
+uv run langgraph dev --config langgraph.json --no-browser --port 8123
+```
+
+- API: `http://127.0.0.1:8123`
+- Docs: `http://127.0.0.1:8123/docs`
+- 그래프 ID:
+  - `bigquery_agent_loop` (현재 기본 런타임)
+  - `bigquery_agent_legacy` (기존 그래프 롤백 경로)
+
 LLM 라우팅/플래너 정책:
 - `BIGQUERY_INTENT_LLM_ENABLED=true`: 의도 분류를 LLM으로 수행
 - `BIGQUERY_INTENT_CONFIDENCE_THRESHOLD=0.55`: 낮은 신뢰도는 자유 대화 경로로 보수 라우팅

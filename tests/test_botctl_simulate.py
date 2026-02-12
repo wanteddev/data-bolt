@@ -241,6 +241,7 @@ def test_simulate_trace_includes_dry_run_validation_node(monkeypatch) -> None:
                 "should_respond": True,
                 "candidate_sql": "SELECT 1;",
                 "routing": {
+                    "runtime_mode": "loop",
                     "route": "data",
                     "confidence": 0.9,
                     "reason": "data request",
@@ -276,3 +277,4 @@ def test_simulate_trace_includes_dry_run_validation_node(monkeypatch) -> None:
     parsed = json.loads(result.stdout)
     nodes = [entry["node"] for entry in parsed["trace"]]
     assert "validate_candidate_sql" in nodes
+    assert "guarded_execute" in nodes

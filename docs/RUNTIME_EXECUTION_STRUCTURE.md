@@ -16,7 +16,36 @@
 1. `simulate`/`chat` 명령이 `run_bigquery_agent()`를 직접 호출
 2. `--via-background`는 `/slack/background` 경로를 로컬 재현
 
-## 2) BigQuery Agent 그래프 (thread 단위)
+## 1.1) 런타임 선택
+
+- 환경변수 `BIGQUERY_AGENT_RUNTIME_MODE`로 런타임을 선택한다.
+- 기본값: `loop`
+- 값:
+  - `loop`: 단순 graph + 단일 `agent_loop` 노드에서 tool 호출 루프 수행
+  - `graph`: 기존 다중 노드 LangGraph 실행
+- 운영 이슈 시 `BIGQUERY_AGENT_RUNTIME_MODE=graph`로 즉시 롤백 가능
+
+## 2) BigQuery Agent 실행 구조 (thread 단위)
+
+### A. loop 런타임(기본)
+
+구현:
+- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py`
+
+토폴로지:
+1. `START`
+2. `agent_loop`
+3. `END`
+
+`agent_loop` 내부 흐름:
+1. turn 상태 초기화
+2. relevance 판정 (false면 빈 응답 종료)
+3. ingest + 액션 플래너
+4. 액션별 tool-like 처리 (`chat_reply`, `schema_lookup`, `sql_validate_explain`, `sql_generate`, `sql_execute`, 승인/취소)
+5. SQL 실행은 `guarded_execute_tool` 단일 관문에서만 수행
+6. 최종 응답 compose
+
+### B. graph 런타임(롤백)
 
 그래프 정의: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/graph.py`
 
@@ -71,7 +100,25 @@
 - `sql_execute`: 실행 대상 SQL 선택/검증 후 실행 정책 판단
 - `execution_approve`/`execution_cancel`: 승인 상태만 처리, 최종 강제는 `policy_gate`
 
-## 5) 실행 정책(`policy_gate`)
+## 5) 실행 정책
+
+### A. loop 런타임
+
+구현:
+- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/tools.py::GuardedExecuteTool.run`
+
+정책 집행:
+1. read-only 단일 statement 여부
+2. dry-run 존재/성공 여부
+3. `BIGQUERY_MAX_BYTES_BILLED` 제한
+4. 비용 임계값(`BIGQUERY_AUTO_EXECUTE_MAX_COST_USD`) 비교
+5. 승인/취소 상태
+
+핵심:
+- 실제 BigQuery execute 호출은 `GuardedExecuteTool` 내부 단일 경로에서만 허용
+- DML/DDL은 승인 여부와 무관하게 무조건 차단
+
+### B. graph 런타임(`policy_gate`)
 
 구현: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py::_node_policy_gate`
 
@@ -99,9 +146,11 @@
 
 구현: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/checkpoint.py`
 
-- `memory`: in-memory saver + compiled graph 재사용
-- `postgres`: 연결별 compiled graph/context 캐시
-- `dynamodb`: table/region/endpoint 키별 compiled graph 캐시
+- `graph`와 `loop` 런타임 각각 독립 캐시를 유지한다.
+- 공통 백엔드:
+  - `memory`: in-memory saver + compiled graph 재사용
+  - `postgres`: 연결별 compiled graph/context 캐시
+  - `dynamodb`: table/region/endpoint 키별 compiled graph 캐시
 
 정책:
 - `dynamodb`는 fail-fast
@@ -121,4 +170,4 @@
 - `/Users/woojing/code/wanted/data-bolt/docs/LANGGRAPH_BIGQUERY_BOT_SPEC.md`
 
 ---
-Last updated: 2026-02-11
+Last updated: 2026-02-12

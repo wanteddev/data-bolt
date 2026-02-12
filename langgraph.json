@@ -1,0 +1,9 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "bigquery_agent_loop": "./src/data_bolt/tasks/bigquery_agent/langgraph_entrypoints.py:loop_graph",
+    "bigquery_agent_legacy": "./src/data_bolt/tasks/bigquery_agent/langgraph_entrypoints.py:legacy_graph"
+  },
+  "env": ".env"
+}

@@ -44,6 +44,10 @@ deployed-version:
 serve:
   {{uv}} run litestar --app data_bolt.app:app run --host 0.0.0.0 --port 8080
 
+[doc("Run LangGraph local dev server (loop + legacy graphs)")]
+langgraph-dev port="8123":
+  {{uv}} run langgraph dev --config langgraph.json --no-browser --port {{port}}
+
 [doc("Sync LAMBDA_* env vars from .env to template.yaml and deploy_stack.sh")]
 sync-env:
   {{uv}} run python scripts/sync_env.py

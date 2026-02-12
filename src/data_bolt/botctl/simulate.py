@@ -205,6 +205,7 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
 
     routing_raw = result.get("routing")
     routing = routing_raw if isinstance(routing_raw, dict) else {}
+    runtime_mode = str(routing.get("runtime_mode") or "graph")
     action = str(result.get("action") or "unknown")
     confidence = routing.get("confidence")
     reason = routing.get("reason")
@@ -301,9 +302,10 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
                     ),
                 }
             )
-    trace.append({"node": "policy_gate", "reason": "실행 정책 점검을 수행했습니다."})
-
-    if action in {"sql_execute", "execution_approve", "execution_cancel", "sql_generate"}:
+    executable_actions = {"sql_execute", "execution_approve", "execution_cancel", "sql_generate"}
+    if action in executable_actions:
+        policy_node = "guarded_execute" if runtime_mode == "loop" else "policy_gate"
+        trace.append({"node": policy_node, "reason": "실행 정책 점검을 수행했습니다."})
         execution_raw = result.get("execution")
         execution: dict[str, Any] = execution_raw if isinstance(execution_raw, dict) else {}
         if execution.get("success"):

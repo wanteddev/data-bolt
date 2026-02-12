@@ -12,8 +12,9 @@
 ## 2) 결정사항
 
 1. 라우팅 모델: **Single-Action Router**
-2. `schema_lookup`: RAG 설명 + 참고 SQL 허용, 실행 금지
-3. 라우터 실패 시: 규칙 기반 추론으로 회귀하지 않고 안전 채팅 폴백
+2. 런타임 모델: **Loop 기본 + Graph 롤백**
+3. `schema_lookup`: RAG 설명 + 참고 SQL 허용, 실행 금지
+4. 라우터 실패 시: 규칙 기반 추론으로 회귀하지 않고 안전 채팅 폴백
 
 ## 3) 액션 계약
 
@@ -31,31 +32,19 @@
 - `intent` 제거, `action` 사용
 - `routing` 메타는 `action`, `confidence`, `reason`, `route`, `fallback_used` 중심
 
-## 4) 그래프 구조
+## 4) 런타임 구조
 
 구현 파일:
+- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py`
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/graph.py`
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py`
 
-노드:
-1. `reset_turn_state`
-2. `classify_relevance`
-3. `ingest`
-4. `plan_turn_action`
-5. `chat_reply | schema_lookup | sql_validate_explain | sql_generate | sql_execute`
-6. `validate_candidate_sql` (`sql_generate`/`sql_execute`에서만)
-7. `policy_gate`
-8. `execute_sql` (조건부)
-9. `compose_response`
+### A. loop 런타임(기본)
+- 단일 `agent_loop` 노드에서 액션 플래닝/툴 호출/응답 조합을 수행한다.
+- SQL 실행 허용 판정과 실제 실행은 `guarded_execute_tool`에서 단일 관문으로 집행한다.
 
-분기:
-- `chat_reply` -> `compose_response`
-- `schema_lookup` -> `compose_response`
-- `sql_validate_explain` -> `compose_response`
-- `sql_generate` -> `validate_candidate_sql` -> `policy_gate`
-- `sql_execute` -> `validate_candidate_sql` -> `policy_gate`
-- `execution_approve/cancel` -> `policy_gate`
-- `policy_gate.can_execute=true`일 때만 `execute_sql`
+### B. graph 런타임(롤백)
+- 기존 다중 노드 그래프 구조를 유지한다.
 
 ## 5) 라우터 프롬프트 계약
 
@@ -83,7 +72,10 @@
 
 ## 6) 실행 정책
 
-구현:
+loop 기본 구현:
+- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/tools.py::GuardedExecuteTool.run`
+
+graph 롤백 구현:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py::_node_policy_gate`
 
 적용 범위:
@@ -96,7 +88,10 @@
 4. 비용 임계값(`BIGQUERY_AUTO_EXECUTE_MAX_COST_USD`)
 5. 승인/취소 상태
 
-`schema_lookup`, `sql_validate_explain`에서는 execute를 절대 호출하지 않는다.
+공통 규칙:
+- `schema_lookup`, `sql_validate_explain`에서는 execute를 절대 호출하지 않는다.
+- DML/DDL은 승인 여부와 무관하게 무조건 차단한다.
+- 비용 임계값 초과 또는 비용 미산출 시 HITL 승인(`실행 승인`/`실행 취소`)을 요구한다.
 
 ## 7) 자유대화와 도구 사용
 
@@ -110,6 +105,7 @@
 - `classify_intent` -> `plan_turn_action`로 대체
 - `plan_free_chat`는 대화 응답 생성 전용
 - `explain_schema_lookup`, `explain_sql_validation` 제공
+- `BIGQUERY_AGENT_RUNTIME_MODE=loop|graph`로 런타임 전환
 
 관련 파일:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/service.py`
@@ -134,4 +130,4 @@
 - `/Users/woojing/code/wanted/data-bolt/docs/LANGGRAPH_BIGQUERY_BOT_SPEC.md`
 
 ---
-Last updated: 2026-02-11
+Last updated: 2026-02-12

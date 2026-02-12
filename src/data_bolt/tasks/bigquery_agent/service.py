@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 
-from . import checkpoint, nodes
+from data_bolt.tasks.bigquery import tools as bigquery_tools
+
+from . import checkpoint, loop_runtime, nodes
 from .types import AgentInput, AgentPayload, AgentResult, AgentState
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,19 @@ _postgres_context_cache = checkpoint._postgres_context_cache
 _postgres_setup_done = checkpoint._postgres_setup_done
 _dynamodb_graph_cache = checkpoint._dynamodb_graph_cache
 
+_loop_memory_runtime_cache = loop_runtime._memory_runtime_cache
+_loop_postgres_graph_cache = loop_runtime._postgres_graph_cache
+_loop_postgres_context_cache = loop_runtime._postgres_context_cache
+_loop_postgres_setup_done = loop_runtime._postgres_setup_done
+_loop_dynamodb_graph_cache = loop_runtime._dynamodb_graph_cache
+
+
+def _resolve_runtime_mode() -> str:
+    mode = nodes._coerce_str(os.getenv("BIGQUERY_AGENT_RUNTIME_MODE", "loop"), "loop").lower()
+    if mode not in {"loop", "graph"}:
+        return "loop"
+    return mode
+
 
 def _sync_node_dependencies() -> None:
     nodes.build_bigquery_sql = build_bigquery_sql
@@ -40,6 +55,11 @@ def _sync_node_dependencies() -> None:
     nodes.explain_sql_validation = explain_sql_validation
     nodes.plan_free_chat = plan_free_chat
     nodes.summarize_execution_result = summarize_execution_result
+
+
+def _sync_tool_dependencies() -> None:
+    bigquery_tools._dry_run_callable = dry_run_bigquery_sql
+    bigquery_tools._execute_callable = execute_bigquery_sql
 
 
 def _sync_checkpoint_dependencies() -> None:
@@ -65,6 +85,22 @@ def _invoke_graph_with_dynamodb(input_state: AgentState, thread_id: str) -> Agen
 
 def _is_checkpoint_backend_error(error: Exception) -> bool:
     return checkpoint._is_checkpoint_backend_error(error)
+
+
+def _invoke_loop_with_memory(input_state: AgentState, thread_id: str) -> AgentState:
+    return loop_runtime._invoke_with_memory(input_state, thread_id)
+
+
+def _invoke_loop_with_postgres(input_state: AgentState, thread_id: str) -> AgentState:
+    return loop_runtime._invoke_with_postgres(input_state, thread_id)
+
+
+def _invoke_loop_with_dynamodb(input_state: AgentState, thread_id: str) -> AgentState:
+    return loop_runtime._invoke_with_dynamodb(input_state, thread_id)
+
+
+def _is_loop_checkpoint_backend_error(error: Exception) -> bool:
+    return loop_runtime._is_checkpoint_backend_error(error)
 
 
 def _build_thread_id(payload: AgentPayload) -> str:
@@ -100,11 +136,67 @@ def _normalize_payload(payload: AgentPayload) -> AgentInput:
     )
 
 
+def _invoke_runtime(
+    *,
+    runtime_mode: str,
+    input_state: AgentState,
+    backend: str,
+    thread_id: str,
+) -> tuple[AgentState, str]:
+    resolved_backend = backend
+
+    if runtime_mode == "graph":
+        if backend == "postgres":
+            try:
+                return _invoke_graph_with_postgres(input_state, thread_id), resolved_backend
+            except Exception as error:
+                allow_memory_fallback = nodes._env_truthy(
+                    os.getenv("LANGGRAPH_POSTGRES_FALLBACK_TO_MEMORY"), False
+                )
+                if not allow_memory_fallback or not _is_checkpoint_backend_error(error):
+                    raise
+                logger.warning(
+                    "bigquery_agent.postgres_fallback_to_memory",
+                    extra={
+                        "error": str(error),
+                        "thread_id": thread_id,
+                        "runtime_mode": runtime_mode,
+                    },
+                )
+                resolved_backend = "memory"
+                return _invoke_graph_with_memory(input_state, thread_id), resolved_backend
+        if backend == "dynamodb":
+            return _invoke_graph_with_dynamodb(input_state, thread_id), resolved_backend
+        return _invoke_graph_with_memory(input_state, thread_id), resolved_backend
+
+    if backend == "postgres":
+        try:
+            return _invoke_loop_with_postgres(input_state, thread_id), resolved_backend
+        except Exception as error:
+            allow_memory_fallback = nodes._env_truthy(
+                os.getenv("LANGGRAPH_POSTGRES_FALLBACK_TO_MEMORY"), False
+            )
+            if not allow_memory_fallback or not _is_loop_checkpoint_backend_error(error):
+                raise
+            logger.warning(
+                "bigquery_agent.loop_postgres_fallback_to_memory",
+                extra={"error": str(error), "thread_id": thread_id, "runtime_mode": runtime_mode},
+            )
+            resolved_backend = "memory"
+            return _invoke_loop_with_memory(input_state, thread_id), resolved_backend
+    if backend == "dynamodb":
+        return _invoke_loop_with_dynamodb(input_state, thread_id), resolved_backend
+    return _invoke_loop_with_memory(input_state, thread_id), resolved_backend
+
+
 def run_bigquery_agent(payload: AgentPayload) -> AgentResult:
     _sync_node_dependencies()
+    _sync_tool_dependencies()
     input_data = _normalize_payload(payload)
+    runtime_mode = _resolve_runtime_mode()
 
     input_state: AgentState = {
+        "runtime_mode": runtime_mode,
         "text": input_data.text,
         "channel_type": input_data.channel_type,
         "is_mention": input_data.is_mention,
@@ -117,26 +209,12 @@ def run_bigquery_agent(payload: AgentPayload) -> AgentResult:
         "history": input_data.history,
     }
 
-    resolved_backend = input_data.backend
-    if input_data.backend == "postgres":
-        try:
-            state = _invoke_graph_with_postgres(input_state, input_data.thread_id)
-        except Exception as e:
-            allow_memory_fallback = nodes._env_truthy(
-                os.getenv("LANGGRAPH_POSTGRES_FALLBACK_TO_MEMORY"), False
-            )
-            if not allow_memory_fallback or not _is_checkpoint_backend_error(e):
-                raise
-            logger.warning(
-                "bigquery_agent.postgres_fallback_to_memory",
-                extra={"error": str(e), "thread_id": input_data.thread_id},
-            )
-            resolved_backend = "memory"
-            state = _invoke_graph_with_memory(input_state, input_data.thread_id)
-    elif input_data.backend == "dynamodb":
-        state = _invoke_graph_with_dynamodb(input_state, input_data.thread_id)
-    else:
-        state = _invoke_graph_with_memory(input_state, input_data.thread_id)
+    state, resolved_backend = _invoke_runtime(
+        runtime_mode=runtime_mode,
+        input_state=input_state,
+        backend=input_data.backend,
+        thread_id=input_data.thread_id,
+    )
 
     generation_result = state.get("generation_result") or {}
     generation_result_meta = generation_result.get("meta")

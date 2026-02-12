@@ -265,6 +265,7 @@ def _route_from_action(action: TurnAction) -> Route:
 
 def _build_routing_meta(state: AgentState) -> dict[str, Any]:
     return {
+        "runtime_mode": state.get("runtime_mode") or "graph",
         "action": state.get("action") or "",
         "confidence": state.get("action_confidence", 0.0),
         "reason": state.get("action_reason") or "",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Annotated
@@ -44,8 +45,10 @@ def chat_command(
     session_thread_ts = thread_ts or str(time.time())
 
     if not as_json:
+        runtime_mode = os.getenv("BIGQUERY_AGENT_RUNTIME_MODE", "loop")
         typer.echo(
-            f"[chat] backend={selected_backend}, thread_ts={session_thread_ts}. "
+            f"[chat] backend={selected_backend}, runtime_mode={runtime_mode}, "
+            f"thread_ts={session_thread_ts}. "
             "종료하려면 exit, quit, /exit 또는 Ctrl-D"
         )
 

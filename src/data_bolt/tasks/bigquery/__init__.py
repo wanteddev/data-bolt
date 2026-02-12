@@ -11,11 +11,12 @@ from .service import (
     plan_turn_action,
     summarize_execution_result,
 )
-from .tools import DryRunTool, ExecuteQueryTool, RagContextTool
+from .tools import DryRunTool, ExecuteQueryTool, GuardedExecuteTool, RagContextTool
 
 __all__ = [
     "DryRunTool",
     "ExecuteQueryTool",
+    "GuardedExecuteTool",
     "RagContextTool",
     "build_bigquery_sql",
     "dry_run_bigquery_sql",

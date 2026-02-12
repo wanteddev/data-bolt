@@ -1,39 +1,28 @@
 digraph BigQueryAgentCurrent {
   rankdir=LR;
-  graph [fontname="Helvetica", fontsize=11, labelloc=t, label="BigQuery Agent Graph (Current)"];
+  graph [fontname="Helvetica", fontsize=11, labelloc=t, label="BigQuery Agent Runtime (Current: loop default, graph rollback)"];
   node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#334155", fontname="Helvetica", fontsize=10];
   edge [color="#475569", fontname="Helvetica", fontsize=9];
 
   START [shape=circle, style="filled", fillcolor="#dcfce7", color="#166534", label="START"];
   END [shape=doublecircle, style="filled", fillcolor="#fee2e2", color="#991b1b", label="END"];
 
-  reset_turn_state;
-  classify_relevance;
-  ingest;
-  clear_response;
-  classify_intent_llm;
-  data_generate_or_validate;
-  validate_candidate_sql;
-  policy_gate;
-  execute_sql;
-  compose_response;
+  runtime_switch [label="run_bigquery_agent\n(BIGQUERY_AGENT_RUNTIME_MODE)", fillcolor="#dbeafe", color="#1d4ed8"];
+  agent_loop [label="agent_loop\n(reset -> relevance -> ingest -> action loop)", fillcolor="#fef3c7", color="#92400e"];
+  guarded_execute [label="guarded_execute_tool\n(single execution chokepoint)", fillcolor="#fde68a", color="#92400e"];
+  compose_response [label="compose_response"];
 
-  START -> reset_turn_state;
-  reset_turn_state -> classify_relevance;
+  legacy_graph [label="legacy graph runtime\n(reset_turn_state -> ... -> policy_gate)", fillcolor="#e2e8f0", color="#475569"];
 
-  classify_relevance -> ingest [label="proceed"];
-  classify_relevance -> clear_response [label="stop"];
+  START -> runtime_switch;
 
-  ingest -> classify_intent_llm;
-  clear_response -> END;
+  runtime_switch -> agent_loop [label="mode=loop (default)"];
+  runtime_switch -> legacy_graph [label="mode=graph"];
 
-  classify_intent_llm -> data_generate_or_validate;
-  data_generate_or_validate -> validate_candidate_sql;
-  validate_candidate_sql -> policy_gate;
+  agent_loop -> guarded_execute [label="sql_generate/sql_execute/approve/cancel"];
+  agent_loop -> compose_response [label="chat/schema/validate"];
+  guarded_execute -> compose_response;
 
-  policy_gate -> execute_sql [label="execute"];
-  policy_gate -> compose_response [label="skip"];
-
-  execute_sql -> compose_response;
   compose_response -> END;
+  legacy_graph -> END;
 }
