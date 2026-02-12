@@ -129,17 +129,16 @@ def _trace_reason(node: str, state: AgentState) -> str:
     if node == "ingest":
         text = state.get("text", "")
         return f"입력 텍스트/히스토리를 conversation으로 정규화했습니다. text='{text[:40]}'"
-    if node == "classify_relevance":
+    if node == "decide_turn":
         should_respond = bool(state.get("should_respond"))
-        return (
-            "응답 조건 충족(멘션/DM/스레드/키워드)으로 진행합니다."
-            if should_respond
-            else "응답 조건 미충족으로 흐름을 종료합니다."
-        )
-    if node == "plan_turn_action":
+        action = state.get("action") or "-"
+        confidence = state.get("action_confidence")
+        reason = state.get("action_reason") or "-"
+        if not should_respond:
+            return "응답 조건 미충족으로 흐름을 종료합니다."
         return (
             f"요청 액션을 '{state.get('action')}'로 선택했습니다. "
-            f"confidence={state.get('action_confidence')}, reason={state.get('action_reason')}"
+            f"confidence={confidence if confidence is not None else '-'}, reason={reason}"
         )
     if node == "route_decision":
         return f"라우팅 경로를 '{state.get('route')}'로 결정했습니다."
@@ -189,10 +188,10 @@ def _trace_reason(node: str, state: AgentState) -> str:
 def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
     trace: list[dict[str, str]] = [
         {"node": "ingest", "reason": "입력 텍스트를 수집했습니다."},
-        {"node": "classify_relevance", "reason": "응답 여부를 판단했습니다."},
     ]
 
     if not result.get("should_respond"):
+        trace.append({"node": "decide_turn", "reason": "응답 조건 미충족으로 종료했습니다."})
         trace.append({"node": "end", "reason": "응답 조건 미충족으로 종료했습니다."})
         return trace
 
@@ -204,7 +203,7 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
     route = routing.get("route")
     trace.append(
         {
-            "node": "plan_turn_action",
+            "node": "decide_turn",
             "reason": (
                 f"요청 액션을 '{action}'로 선택했습니다. "
                 f"confidence={confidence if confidence is not None else '-'}, "
@@ -294,7 +293,7 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
                     ),
                 }
             )
-    executable_actions = {"sql_execute", "execution_approve", "execution_cancel", "sql_generate"}
+    executable_actions = {"sql_execute", "execution_approve", "execution_cancel"}
     if action in executable_actions:
         trace.append({"node": "guarded_execute", "reason": "실행 정책 점검을 수행했습니다."})
         execution_raw = result.get("execution")

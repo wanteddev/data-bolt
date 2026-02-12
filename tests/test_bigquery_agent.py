@@ -95,6 +95,39 @@ def test_run_bigquery_agent_routes_data_workflow(monkeypatch) -> None:
     assert result["routing"]["route"] == "data"
     assert result["candidate_sql"] == "SELECT COUNT(*) AS cnt FROM users;"
     assert "Dry-run" in result["response_text"]
+    assert "다음에 해볼 수 있는 분석" not in result["response_text"]
+
+
+def test_run_bigquery_agent_renders_only_llm_follow_up_suggestions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_agent,
+        "build_bigquery_sql",
+        lambda _payload: {
+            "answer_structured": {
+                "sql": "SELECT COUNT(*) AS cnt FROM users;",
+                "explanation": "가입자 수를 집계합니다.",
+                "follow_up_questions": [
+                    "전주 대비 증감률도 같이 볼까요?",
+                    "채널별 분해 결과도 확인할까요?",
+                ],
+            },
+            "validation": {"success": True, "total_bytes_processed": 1, "estimated_cost_usd": 0.0},
+        },
+    )
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D1",
+            "thread_ts": "100.25",
+            "channel_type": "im",
+            "text": "전체 사용자 수 알려줘",
+        }
+    )
+
+    assert "다음에 해볼 수 있는 분석" in result["response_text"]
+    assert "1. 전주 대비 증감률도 같이 볼까요?" in result["response_text"]
+    assert "2. 채널별 분해 결과도 확인할까요?" in result["response_text"]
 
 
 def test_run_bigquery_agent_routes_free_chat_with_planner(monkeypatch) -> None:
@@ -130,6 +163,7 @@ def test_run_bigquery_agent_routes_free_chat_with_planner(monkeypatch) -> None:
     assert result["routing"]["route"] == "chat"
     assert result["action"] == "chat_reply"
     assert "원하는 지표와 기간" in result["response_text"]
+    assert "다음에 해볼 수 있는 분석" not in result["response_text"]
 
 
 def test_run_bigquery_agent_router_error_falls_back_to_safe_chat(monkeypatch) -> None:
@@ -196,6 +230,43 @@ def test_run_bigquery_agent_llm_data_action_routes_to_data_node(monkeypatch) -> 
 
     assert result["routing"]["route"] == "data"
     assert result["candidate_sql"] == "SELECT 1;"
+
+
+def test_run_bigquery_agent_asks_clarifying_question_before_generation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "chat_reply",
+            "intent_mode": "analysis",
+            "needs_clarification": True,
+            "clarifying_question": "분석 기준을 맞추기 위해 서비스와 기간을 먼저 정할까요?",
+            "execution_intent": "none",
+            "confidence": 0.7,
+            "reason": "clarification required",
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
+        "execute_bigquery_sql",
+        lambda _sql: (_ for _ in ()).throw(AssertionError("execute should not be called")),
+    )
+
+    result = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D1",
+            "thread_ts": "100.3005",
+            "channel_type": "im",
+            "text": "지난주 신규 가입자 분석해보고 싶어",
+        }
+    )
+
+    assert result["action"] == "chat_reply"
+    assert result["routing"]["intent_mode"] == "analysis"
+    assert result["routing"]["needs_clarification"] is True
+    assert "서비스와 기간" in result["response_text"]
+    assert result["execution"] == {}
 
 
 def test_run_bigquery_agent_schema_lookup_never_executes(monkeypatch) -> None:
@@ -317,6 +388,17 @@ def test_run_bigquery_agent_executes_when_requested(monkeypatch) -> None:
 def test_run_bigquery_agent_auto_executes_generated_sql_when_low_cost(monkeypatch) -> None:
     monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
     executed: dict[str, str] = {}
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "sql_generate",
+            "intent_mode": "retrieval",
+            "execution_intent": "explicit",
+            "confidence": 0.92,
+            "reason": "explicit execution requested",
+        },
+    )
 
     monkeypatch.setattr(
         bigquery_agent,
@@ -369,6 +451,17 @@ def test_run_bigquery_agent_auto_executes_generated_sql_when_low_cost(monkeypatc
 def test_run_bigquery_agent_adds_llm_result_insight_sections(monkeypatch) -> None:
     monkeypatch.setenv("BIGQUERY_RESULT_INSIGHT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "sql_generate",
+            "intent_mode": "retrieval",
+            "execution_intent": "explicit",
+            "confidence": 0.92,
+            "reason": "explicit execution requested",
+        },
+    )
     monkeypatch.setattr(
         bigquery_agent,
         "build_bigquery_sql",
@@ -435,6 +528,17 @@ def test_run_bigquery_agent_requires_approval_when_cost_above_threshold(monkeypa
     monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
     monkeypatch.setattr(
         bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "sql_generate",
+            "intent_mode": "retrieval",
+            "execution_intent": "explicit",
+            "confidence": 0.92,
+            "reason": "explicit execution requested",
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
         "build_bigquery_sql",
         lambda _payload: {
             "answer_structured": {"sql": "SELECT 2 AS value;", "explanation": "ok"},
@@ -472,6 +576,17 @@ def test_run_bigquery_agent_requires_approval_when_cost_above_threshold(monkeypa
 
 def test_run_bigquery_agent_requires_approval_when_cost_unknown(monkeypatch) -> None:
     monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "sql_generate",
+            "intent_mode": "retrieval",
+            "execution_intent": "explicit",
+            "confidence": 0.92,
+            "reason": "explicit execution requested",
+        },
+    )
     monkeypatch.setattr(
         bigquery_agent,
         "build_bigquery_sql",
@@ -1245,3 +1360,48 @@ def test_run_bigquery_agent_loop_mode_requires_approval_for_high_cost(monkeypatc
     assert result["execution"]["success"] is False
     assert result["routing"]["execution_policy"] == "approval_required"
     assert "실행 승인" in result["execution"]["error"]
+
+
+def test_run_bigquery_agent_resets_loop_step_each_request(monkeypatch) -> None:
+    monkeypatch.setenv("BIGQUERY_AGENT_LOOP_MAX_STEPS", "1")
+    monkeypatch.setenv("BIGQUERY_CHAT_PLANNER_ENABLED", "true")
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_turn_action",
+        lambda **_kwargs: {
+            "action": "chat_reply",
+            "intent_mode": "chat",
+            "execution_intent": "none",
+            "confidence": 0.9,
+            "reason": "chat response",
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_agent,
+        "plan_free_chat",
+        lambda **_kwargs: {"assistant_response": "ok"},
+    )
+
+    first = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D9",
+            "thread_ts": "step-reset-1",
+            "channel_type": "im",
+            "text": "안녕",
+        }
+    )
+    second = bigquery_agent.run_bigquery_agent(
+        {
+            "team_id": "T1",
+            "channel_id": "D9",
+            "thread_ts": "step-reset-1",
+            "channel_type": "im",
+            "text": "한번 더",
+        }
+    )
+
+    limit_message = "요청을 처리하는 중 내부 단계 제한에 도달했습니다."
+    assert limit_message not in first["response_text"]
+    assert limit_message not in second["response_text"]
+    assert second["response_text"] == "ok"

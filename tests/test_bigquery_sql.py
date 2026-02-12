@@ -519,3 +519,8 @@ def test_build_bigquery_sql_general_chat_plain_text_skips_dry_run(monkeypatch) -
     assert result["answer_structured"]["sql"] is None
     assert result["answer_structured"]["explanation"] == "안녕하세요"
     assert "validation" not in result
+
+
+def test_get_refine_attempts_is_hard_capped_to_three(monkeypatch) -> None:
+    monkeypatch.setenv("BIGQUERY_REFINE_MAX_ATTEMPTS", "999")
+    assert bigquery_sql._get_refine_attempts() == 3

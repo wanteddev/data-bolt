@@ -8,6 +8,7 @@
 1. 하드코딩 키워드 의도판단 제거
 2. 단일 액션 라우터 기반 노드 선택
 3. 실행 경로와 비실행 경로(`schema_lookup`, `sql_validate_explain`)의 명확한 분리
+4. 분석 의도 구체화(clarification) 우선, 실행은 명시 의도 기반으로 분리
 
 ## 2) 결정사항
 
@@ -55,13 +56,17 @@
 
 출력(JSON 강제):
 - `action`
+- `intent_mode`
+- `needs_clarification`
+- `clarifying_question`
+- `execution_intent`
 - `confidence`
 - `reason`
 
 규칙:
 - 스키마/가능 데이터 문의 -> `schema_lookup`
 - SQL 검증/설명 요청 -> `sql_validate_explain`
-- 데이터 조회/집계 요청 -> `sql_generate`
+- 데이터 조회/집계 요청 -> `sql_generate` (단, 모호하면 clarification 우선)
 - 명시 실행/승인/취소 -> `sql_execute` / `execution_approve` / `execution_cancel`
 - 불확실/실패 시 -> `chat_reply` 폴백
 
@@ -71,7 +76,7 @@
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/tools.py::GuardedExecuteTool.run`
 
 적용 범위:
-- `sql_generate`, `sql_execute`, `execution_approve`, `execution_cancel`
+- `sql_execute`, `execution_approve`, `execution_cancel`
 
 검사 항목:
 1. read-only SQL 여부
@@ -82,6 +87,7 @@
 
 공통 규칙:
 - `schema_lookup`, `sql_validate_explain`에서는 execute를 절대 호출하지 않는다.
+- `sql_generate`는 기본적으로 실행을 트리거하지 않는다. `execution_intent=explicit`일 때만 실행 단계로 진입한다.
 - DML/DDL은 승인 여부와 무관하게 무조건 차단한다.
 - 비용 임계값 초과 또는 비용 미산출 시 HITL 승인(`실행 승인`/`실행 취소`)을 요구한다.
 
@@ -111,6 +117,7 @@
 4. `execution_approve/cancel`이 정상 처리된다.
 5. 라우터 실패 시 `chat_reply` 안전 폴백이 동작한다.
 6. ignore 턴은 conversation을 오염시키지 않는다.
+7. 실행/비실행 턴 모두 다음 분석 제안(2~3개)을 제공하고 thread 단위 analysis brief를 갱신한다.
 
 ## 10) 문서 동기화 규칙
 

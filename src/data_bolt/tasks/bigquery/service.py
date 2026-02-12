@@ -33,6 +33,7 @@ _to_anthropic_messages = llm_client._to_anthropic_messages
 _build_laas_messages = prompting._build_laas_messages
 _classify_instruction_type = prompting._classify_instruction_type
 _clip_history = prompting._clip_history
+_build_refine_instruction_block = prompting._build_refine_instruction_block
 
 _rag_context_tool = rag_context_tool
 _dry_run_tool = dry_run_tool
@@ -60,11 +61,13 @@ def execute_bigquery_sql(sql: str) -> dict[str, Any]:
 
 
 def _get_refine_attempts() -> int:
-    raw = os.getenv("BIGQUERY_REFINE_MAX_ATTEMPTS", "1")
+    raw = os.getenv("BIGQUERY_REFINE_MAX_ATTEMPTS", "3")
     try:
-        return max(0, int(raw))
+        value = int(raw)
     except ValueError:
-        return 1
+        value = 3
+    # Enforce bounded retries while allowing user-requested max retry loop.
+    return max(0, min(3, value))
 
 
 def _env_truthy(value: str | None, default: bool = False) -> bool:
@@ -173,17 +176,24 @@ def plan_turn_action(
 반드시 아래 스키마로 응답:
 {
   "action": "chat_reply | schema_lookup | sql_validate_explain | sql_generate | sql_execute | execution_approve | execution_cancel",
+  "intent_mode": "analysis | retrieval | execution | chat",
+  "needs_clarification": false,
+  "clarifying_question": "",
+  "execution_intent": "none | suggested | explicit",
   "confidence": 0.0,
   "reason": "짧은 근거"
 }
 
 규칙:
 - 일반 대화/아이데이션/메타 질문이면 action=chat_reply
+- 분석/원인/해석 중심 요청이면 action=schema_lookup 또는 sql_validate_explain을 우선한다.
 - 스키마/테이블/컬럼/조회 가능 항목 문의면 action=schema_lookup
 - SQL 설명/검증/문법 점검 요청이면 action=sql_validate_explain
-- 데이터 추출/집계 쿼리 생성 요청이면 action=sql_generate
-- 사용자 SQL 실행 요청이면 action=sql_execute
+- 데이터 추출/집계 쿼리 생성 요청이라도 지표/서비스/기간이 모호하면 needs_clarification=true로 두고 action=chat_reply를 선택한다.
+- 데이터 요청이 충분히 구체적일 때만 action=sql_generate
+- 사용자 SQL 실행 요청이면 action=sql_execute, execution_intent=explicit
 - 승인/취소 메시지이며 pending execution이 있으면 execution_approve 또는 execution_cancel
+- sql_generate는 기본적으로 execution_intent=suggested로 둔다. 실행을 명시하지 않았다면 explicit로 올리지 않는다.
 - 불확실하면 chat_reply를 선택하고 confidence를 낮게 설정
         """
     ).strip()
@@ -516,40 +526,7 @@ def refine_bigquery_sql(
     prev_sql: str,
     error: str,
 ) -> str:
-    system_prompt = (
-        """
-너는 **BigQuery 표준 SQL**을 작성하는 데이터 엔지니어 도우미다. 아래 “응답 규칙”과 “절차”를 항상 지켜라.
-
-[응답 규칙]
-1) BigQuery 표준 SQL만 사용 (legacy 금지), SELECT * 금지, 스키마에 없는 컬럼 추측 금지.
-2) 한국 시간(Asia/Seoul) 기준 시간 해석이 필요하면 TIMESTAMP/DATETIME 변환을 명시.
-3) 조인 시 키와 null 처리 근거를 설명에 적시.
-4) 결과는 반드시 단일 statement의 read-only SELECT/CTE로 제공. 임시 테이블 금지.
-5) 출력 형식은 아래 JSON 스키마를 따를 것:
-{
-  "sql": "<BigQuery SQL>",
-  "explanation": "<요청 해석, 조인/필터 근거, 시간대 처리 근거>",
-  "assumptions": "<제공되지 않은 가정이 있다면 나열, 없으면 빈 배열 또는 빈 문자열>",
-  "validation_steps": [
-    "스키마 존재 확인 방법",
-    "작은 기간으로 샘플 실행해 행수/NULL 비율 검증",
-    "엣지 케이스 점검 아이디어"
-  ]
-}
-6) BigQuery standard SQL 사용, legacy SQL 금지
-7) COUNT(_) 사용 금지, COUNT(*) 사용
-8) 타임존 변환 명시 (DATETIME(TIMESTAMP(...), "Asia/Seoul"))
-9) 성능 고려: 조인 시 필요한 컬럼만 SELECT, 불필요한 full scan 최소화
-10) 실행 가능성 우선: dry-run 성공 가능성을 높이는 안전한 문법/스키마 선택
-
-[절차]
-1) 요청 분석: 비즈니스 질문을 한 문장으로 재진술.
-2) 컨텍스트 선택: 제공된 DDL/용어집에서 필요한 부분만 인용.
-3) 설계: 조인 키, 필터, 집계, 타임존 처리 방식을 글머리표로 설명.
-4) 생성: 설계대로 SQL 작성(실행 가능한 read-only 단일 statement).
-5) 자체 검증: 체크리스트로 점검 후 필요 시 수정.
-        """
-    ).strip()
+    system_prompt = _build_refine_instruction_block()
     user_prompt = (
         f"""
 ### 1) 비즈니스 요청
@@ -680,6 +657,7 @@ def _validate_with_refine(
                         "success": True,
                         "refined": True,
                         "sql": _ensure_trailing_semicolon(candidate),
+                        "error": None,
                         "total_bytes_processed": meta.get("total_bytes_processed"),
                         "estimated_cost_usd": estimate_query_cost_usd(
                             meta.get("total_bytes_processed")

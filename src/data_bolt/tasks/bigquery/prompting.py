@@ -8,6 +8,67 @@ from typing import Any
 from .parser import _looks_like_sql
 
 
+def _build_bigquery_sql_rules_block() -> str:
+    return (
+        """
+[응답 규칙]
+1) BigQuery 표준 SQL만 사용 (legacy 금지), SELECT * 금지, 스키마에 없는 컬럼 추측 금지.
+2) 실행 가능한 단일 read-only statement(SELECT/WITH)만 생성하고 다중 statement 금지.
+3) 한국 시간(Asia/Seoul) 고려 시 TIMESTAMP/DATETIME 변환을 명시.
+   - `AT TIME ZONE` 문법은 사용하지 말고, BigQuery 함수(`DATE(ts, 'Asia/Seoul')`, `DATETIME(ts, 'Asia/Seoul')`)를 사용.
+   - "지난 주(월~일)" 범위는 `DATE_TRUNC(CURRENT_DATE('Asia/Seoul'), WEEK(MONDAY))`를 기준으로 계산.
+   - `TIMESTAMP_SUB(..., INTERVAL n WEEK)` 패턴 금지.
+   - `DATE_TRUNC` 사용 시 DATE 타입에는 인자 2개만 허용됨: `DATE_TRUNC(date_expr, WEEK(MONDAY))`.
+   - 금지 예시: `DATE_TRUNC(CURRENT_DATE('Asia/Seoul'), WEEK, 1)`.
+   - 권장 예시:
+     `DATE_SUB(DATE_TRUNC(CURRENT_DATE('Asia/Seoul'), WEEK(MONDAY)), INTERVAL 1 WEEK)` ~
+     `DATE_TRUNC(CURRENT_DATE('Asia/Seoul'), WEEK(MONDAY))`.
+4) 조인 시 키와 null 처리 근거를 설명에 적시.
+5) 출력 JSON 스키마:
+{
+  "sql": "<BigQuery SQL>",
+  "explanation": "<요청 해석, 조인/필터 근거, 시간대 처리 근거, 실행/비용 리스크>",
+  "assumptions": "<제공되지 않은 가정 목록 또는 빈 배열/문자열>",
+  "validation_steps": [
+    "스키마 존재 확인 방법",
+    "작은 기간으로 샘플 실행해 행수/NULL 비율 검증",
+    "엣지 케이스 점검 아이디어"
+  ]
+}
+6) COUNT(_) 금지, COUNT(*) 사용.
+7) 불확실한 부분은 보수적으로 가정하고 explanation/assumptions에 명시.
+8) dry-run 성공 가능성을 최우선으로 SQL 문법/구조를 구성.
+9) 사용자가 명시적으로 실행을 요청하지 않았다면 실행 자체를 가정하지 말고 분석/검증 중심으로 설명한다.
+        """
+    ).strip()
+
+
+def _build_bigquery_sql_process_block() -> str:
+    return (
+        """
+[절차]
+1) 요청 재진술
+2) 컨텍스트 선택
+3) 실행 가능 설계(조인/필터/비용)
+4) SQL 생성
+5) 자체 검증
+        """
+    ).strip()
+
+
+def _build_refine_instruction_block() -> str:
+    return (
+        """
+[Directive]
+너는 **BigQuery 표준 SQL** 수정 전문 도우미다. dry-run 에러를 반영해 SQL을 고쳐라.
+        """
+        + "\n\n"
+        + _build_bigquery_sql_rules_block()
+        + "\n\n"
+        + _build_bigquery_sql_process_block()
+    ).strip()
+
+
 def _classify_instruction_type(question: str, history: list[dict[str, Any]] | None) -> str:
     q = (question or "").lower()
     wants_analysis = any(
@@ -55,33 +116,12 @@ def _build_instruction_block(instruction_type: str) -> str:
         return (
             """
 [Directive]
-너는 BigQuery 표준 SQL을 작성하는 데이터 엔지니어 도우미다. 목표는 "실행 가능한 SQL"이다.
-반드시 아래 규칙과 절차를 따른다.
-
-[응답 규칙]
-1) BigQuery 표준 SQL만 사용 (legacy 금지), 스키마에 없는 컬럼 추측 금지.
-2) 실행 가능한 단일 read-only statement(SELECT/WITH)만 생성하고 다중 statement 금지.
-3) SELECT * 금지, 필요한 컬럼만 선택하여 비용을 최소화.
-4) 한국 시간(Asia/Seoul) 고려 시 TIMESTAMP/DATETIME 변환을 명시.
-5) 조인 시 키와 null 처리 근거를 설명에 적시.
-6) 출력 JSON 스키마:
-{
-  "sql": "<BigQuery SQL>",
-  "explanation": "<요청 해석, 조인/필터 근거, 시간대 처리 근거, 실행/비용 리스크>",
-  "assumptions": "<제공되지 않은 가정 목록 또는 빈 배열/문자열>",
-  "validation_steps": [
-    "스키마 존재 확인 방법",
-    "작은 기간으로 샘플 실행해 행수/NULL 비율 검증",
-    "엣지 케이스 점검 아이디어"
-  ]
-}
-7) COUNT(_) 금지, COUNT(*) 사용.
-8) 불확실한 부분은 보수적으로 가정하고 explanation/assumptions에 명시.
-9) dry-run 성공 가능성을 최우선으로 SQL 문법/구조를 구성.
-
-[절차]
-1) 요청 재진술 → 2) 컨텍스트 선택 → 3) 실행 가능 설계(조인/필터/비용) → 4) SQL 생성 → 5) 자체 검증.
+너는 BigQuery 표준 SQL을 작성하는 데이터 분석 도우미다. 목표는 "분석 의도를 검증 가능한 SQL로 구체화"하는 것이다.
             """
+            + "\n\n"
+            + _build_bigquery_sql_rules_block()
+            + "\n\n"
+            + _build_bigquery_sql_process_block()
         ).strip()
     if instruction_type == "bigquery_sql_analysis":
         return (

@@ -52,7 +52,7 @@ def _reset_memory_state() -> None:
     bigquery_agent._dynamodb_graph_cache.clear()
 
 
-def test_chat_e2e_generate_auto_executes_when_cost_is_low(monkeypatch) -> None:
+def test_chat_e2e_generate_does_not_execute_without_explicit_intent(monkeypatch) -> None:
     _reset_memory_state()
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
@@ -78,8 +78,8 @@ def test_chat_e2e_generate_auto_executes_when_cost_is_low(monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert ":rocket: 쿼리 실행 완료" in result.output
-    assert executed["sql"] == "SELECT COUNT(*) AS total_users FROM users;"
+    assert ":rocket: 쿼리 실행 완료" not in result.output
+    assert "sql" not in executed
 
 
 def test_chat_e2e_cancel_clears_pending(monkeypatch) -> None:

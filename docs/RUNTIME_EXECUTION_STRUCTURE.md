@@ -30,8 +30,8 @@
 6. `END`
 
 핵심 흐름:
-1. `prepare_node`: turn 초기화 + relevance 판정 + ingest
-2. `agent_node`: LLM 기반 action/tool_call 결정, 필요 시 SQL 생성(`sql_generate`)
+1. `prepare_node`: turn 초기화 + 통합 결정기(`decide_turn`)의 relevance-only 판정 + ingest
+2. `agent_node`: 통합 결정기(`decide_turn`)가 `action/intent_mode/execution_intent/turn_mode/planned_tool`을 결정하고, 필요 시 SQL 생성(`sql_generate`)
 3. `agent_node` 조건부 분기
 - tool_calls 있음 -> `tools_node`
 - tool_calls 없음 -> `finalize_node`
@@ -60,12 +60,19 @@
 - 규칙 기반 의도 추론으로 되돌아가지 않음
 - 안전 채팅 폴백(`chat_reply`) 사용
 
+추가 메타:
+- `turn_mode`: `chat | analyze | execute`
+- `planned_tool`: action 기준으로 선택된 tool 이름(없으면 빈 문자열)
+- `intent_mode`: `analysis | retrieval | execution | chat`
+- `execution_intent`: `none | suggested | explicit`
+- `needs_clarification`: 모호성 질문 필요 여부
+
 ## 4) 액션별 책임
 
 - `chat_reply`: agent가 최종 자연어 응답 생성(도구 실행 없음)
 - `schema_lookup`: agent가 `schema_lookup(...)` tool_call 생성, tools가 실행
 - `sql_validate_explain`: agent가 `sql_validate_explain(sql=...)` tool_call 생성, tools가 dry-run 검증 수행
-- `sql_generate`: agent가 SQL 생성(LLM) 후 필요 시 `sql_execute(sql=...)` 등 후속 tool_call 생성
+- `sql_generate`: agent가 SQL 생성(LLM)과 검증 정보를 제공한다. 실행은 `execution_intent=explicit`일 때만 후속 `sql_execute`로 진입한다.
 - `sql_execute`: agent가 대상 SQL args를 구성, tools가 guard + 실행/보류 처리
 - `execution_approve`/`execution_cancel`: agent가 승인/취소 tool_call 생성, tools가 pending request에 대해 집행
 

@@ -122,7 +122,7 @@ def _request_id(state: AgentState) -> str:
     return f"exec-{uuid4().hex[:10]}"
 
 
-def _ensure_turn_state(state: AgentState) -> None:
+def _ensure_turn_state(state: AgentState, *, reset_for_new_request: bool = False) -> None:
     turn = state.get("turn")
     max_steps = _get_loop_max_steps()
     if not isinstance(turn, dict):
@@ -137,9 +137,14 @@ def _ensure_turn_state(state: AgentState) -> None:
         max_steps_value = int(max_steps_raw) if max_steps_raw is not None else max_steps
     except (TypeError, ValueError):
         max_steps_value = max_steps
-    turn.setdefault("terminated", False)
-    turn.setdefault("termination_reason", "")
-    turn["step"] = max(0, step)
+    if reset_for_new_request:
+        turn["terminated"] = False
+        turn["termination_reason"] = ""
+        turn["step"] = 0
+    else:
+        turn.setdefault("terminated", False)
+        turn.setdefault("termination_reason", "")
+        turn["step"] = max(0, step)
     turn["max_steps"] = max(1, min(8, max_steps_value))
     state["turn"] = turn
 
@@ -369,8 +374,11 @@ def _node_prepare(state: AgentState) -> AgentState:
     working["runtime_mode"] = "loop"
 
     _apply_patch(working, nodes._node_reset_turn_state(working))
-    _apply_patch(working, nodes._node_classify_relevance(working))
-    _ensure_turn_state(working)
+    _apply_patch(
+        working,
+        nodes._node_decide_turn(working, check_relevance=True, plan_action=False),
+    )
+    _ensure_turn_state(working, reset_for_new_request=True)
     working["tool_calls"] = []
     working["agent_should_finalize"] = False
     if not working.get("should_respond"):
@@ -409,7 +417,10 @@ def _node_agent(state: AgentState) -> AgentState:
         working["agent_should_finalize"] = True
         return cast(AgentState, working)
 
-    _apply_patch(working, nodes._node_plan_turn_action(working))
+    _apply_patch(
+        working,
+        nodes._node_decide_turn(working, check_relevance=False, plan_action=True),
+    )
     action = nodes._coerce_turn_action(working.get("action"), default="chat_reply")
 
     tool_calls: list[ToolCall] = []
@@ -418,11 +429,13 @@ def _node_agent(state: AgentState) -> AgentState:
         working["agent_should_finalize"] = True
     elif action == "sql_generate":
         _apply_patch(working, nodes._node_sql_generate(working))
-        sql = nodes._coerce_str(working.get("candidate_sql")).strip() or None
-        args: dict[str, Any] = {}
-        if sql:
-            args["sql"] = sql
-        tool_calls = [{"id": f"tc-{step}-1", "name": "sql_execute", "args": args}]
+        execution_intent = nodes._coerce_str(working.get("execution_intent")).strip().lower()
+        if execution_intent == "explicit":
+            sql = nodes._coerce_str(working.get("candidate_sql")).strip() or None
+            args: dict[str, Any] = {}
+            if sql:
+                args["sql"] = sql
+            tool_calls = [{"id": f"tc-{step}-1", "name": "sql_execute", "args": args}]
     elif action == "schema_lookup":
         tool_calls = [
             {

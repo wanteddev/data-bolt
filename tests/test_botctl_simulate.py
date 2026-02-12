@@ -223,7 +223,7 @@ def test_simulate_persistent_trace_includes_rag_and_laas(monkeypatch) -> None:
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
     nodes = [entry["node"] for entry in parsed["trace"]]
-    assert "plan_turn_action" in nodes
+    assert "decide_turn" in nodes
     assert "route_decision" in nodes
     assert "sql_generate" in nodes
     assert "rag_context_lookup" in nodes
@@ -277,4 +277,4 @@ def test_simulate_trace_includes_dry_run_validation_node(monkeypatch) -> None:
     parsed = json.loads(result.stdout)
     nodes = [entry["node"] for entry in parsed["trace"]]
     assert "validate_candidate_sql" in nodes
-    assert "guarded_execute" in nodes
+    assert "guarded_execute" not in nodes

@@ -86,7 +86,12 @@ class AgentState(TypedDict, total=False):
     glossary_info: str
     history: list[ConversationMessage]
     conversation: list[ConversationMessage]
+    analysis_brief: dict[str, Any]
     should_respond: bool
+    intent_mode: str
+    execution_intent: str
+    needs_clarification: bool
+    clarifying_question: str
     action: TurnAction
     user_sql: str | None
     candidate_sql: str | None
@@ -100,6 +105,8 @@ class AgentState(TypedDict, total=False):
     response_text: str
     error: str | None
     route: Route
+    turn_mode: str
+    planned_tool: str
     action_confidence: float
     action_reason: str
     fallback_used: bool

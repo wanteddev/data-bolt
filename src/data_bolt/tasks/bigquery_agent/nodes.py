@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, cast
 
 from data_bolt.tasks import bigquery as bigquery_tasks
@@ -205,11 +206,148 @@ def _normalize_history(value: Any) -> list[ConversationMessage]:
     return history
 
 
+def _coerce_analysis_brief(value: Any) -> dict[str, Any]:
+    brief = value if isinstance(value, dict) else {}
+    goal = _coerce_str(brief.get("goal")).strip()
+    metric_definition = _coerce_str(brief.get("metric_definition")).strip()
+    scope = _coerce_str(brief.get("scope")).strip()
+    time_window = _coerce_str(brief.get("time_window")).strip()
+    latest_findings = _coerce_str_list(brief.get("latest_findings"), limit=5)
+    open_questions = _coerce_str_list(brief.get("open_questions"), limit=5)
+    next_actions = _coerce_str_list(brief.get("next_recommended_actions"), limit=3)
+    return {
+        "goal": goal,
+        "metric_definition": metric_definition,
+        "scope": scope,
+        "time_window": time_window,
+        "latest_findings": latest_findings,
+        "open_questions": open_questions,
+        "next_recommended_actions": next_actions,
+    }
+
+
+def _coerce_str_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return items[:limit]
+
+
+def _infer_intent_mode(action: TurnAction) -> str:
+    if action in {"schema_lookup", "sql_validate_explain"}:
+        return "analysis"
+    if action == "sql_generate":
+        return "retrieval"
+    if action in {"sql_execute", "execution_approve", "execution_cancel"}:
+        return "execution"
+    return "chat"
+
+
+def _coerce_intent_mode(value: Any, *, action: TurnAction) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"analysis", "retrieval", "execution", "chat"}:
+            return normalized
+    return _infer_intent_mode(action)
+
+
+def _coerce_execution_intent(value: Any, *, text: str, action: TurnAction) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"none", "suggested", "explicit"}:
+            return normalized
+    if action in {"sql_execute", "execution_approve", "execution_cancel"}:
+        return "explicit"
+    explicit_signal = bool(
+        re.search(r"(실행(해|해줘|해주세요|해 볼|해봐)|돌려(줘|주세요)|run|execute)", text, re.I)
+    )
+    if explicit_signal:
+        return "explicit"
+    if action == "sql_generate":
+        return "suggested"
+    return "none"
+
+
+def _needs_clarification_fallback(text: str) -> bool:
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    has_analysis_signal = any(
+        token in normalized for token in ("분석", "해석", "원인", "인사이트", "추이", "비교")
+    )
+    has_scope_signal = any(
+        token in normalized for token in ("서비스", "채널", "세그먼트", "플랫폼")
+    )
+    has_time_signal = any(
+        token in normalized
+        for token in ("어제", "오늘", "지난", "최근", "주", "월", "년", "기간", "date")
+    )
+    has_metric_signal = any(
+        token in normalized for token in ("가입", "사용자", "매출", "전환", "건수", "비율", "지표")
+    )
+    # 분석 의도는 있는데 지표/범위/기간이 충분히 명시되지 않은 경우.
+    return has_analysis_signal and not ((has_scope_signal and has_time_signal) or has_metric_signal)
+
+
+def _extract_llm_follow_up_suggestions(result: dict[str, Any]) -> list[str]:
+    structured_raw = result.get("answer_structured")
+    structured = structured_raw if isinstance(structured_raw, dict) else {}
+    candidates = structured.get("follow_up_questions")
+    if not isinstance(candidates, list):
+        candidates = structured.get("next_recommended_actions")
+    parsed = _coerce_str_list(candidates, limit=3)
+    deduped: list[str] = []
+    for item in parsed:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped[:3]
+
+
+def _update_analysis_brief(state: AgentState, follow_ups: list[str]) -> dict[str, Any]:
+    brief = _coerce_analysis_brief(state.get("analysis_brief"))
+    text = _coerce_str(state.get("text")).strip()
+    if text and not brief.get("goal"):
+        brief["goal"] = text
+
+    execution = state.get("execution") if isinstance(state.get("execution"), dict) else {}
+    dry_run = state.get("dry_run") if isinstance(state.get("dry_run"), dict) else {}
+    findings = list(brief.get("latest_findings", []))
+    open_questions = list(brief.get("open_questions", []))
+    if dry_run:
+        if dry_run.get("success"):
+            findings.append(
+                "dry-run 통과: "
+                f"bytes={_format_number(dry_run.get('total_bytes_processed'))}, "
+                f"cost={dry_run.get('estimated_cost_usd', '-')}"
+            )
+        else:
+            open_questions.append(f"dry-run 실패 원인 확인 필요: {dry_run.get('error', '-')}")
+    if execution:
+        if execution.get("success"):
+            findings.append(
+                "쿼리 실행 완료: "
+                f"row_count={_format_number(execution.get('row_count'))}, "
+                f"job_id={execution.get('job_id', '-')}"
+            )
+        else:
+            error = _coerce_str(execution.get("error")).strip()
+            if error:
+                open_questions.append(error)
+    clarifying_question = _coerce_str(state.get("clarifying_question")).strip()
+    if clarifying_question:
+        open_questions.append(clarifying_question)
+    brief["latest_findings"] = findings[-5:]
+    brief["open_questions"] = open_questions[-5:]
+    brief["next_recommended_actions"] = follow_ups[:3]
+    return brief
+
+
 def _coerce_turn_action(value: Any, default: TurnAction = "chat_reply") -> TurnAction:
     if not isinstance(value, str):
         return default
     normalized = value.strip().lower()
     mapping: dict[str, TurnAction] = {
+        "ignore": "ignore",
         "chat": "chat_reply",
         "free_chat": "chat_reply",
         "chat_reply": "chat_reply",
@@ -231,10 +369,48 @@ def _route_from_action(action: TurnAction) -> Route:
     return "data"
 
 
+def _mode_from_action(action: TurnAction) -> str:
+    if action == "chat_reply":
+        return "chat"
+    if action in {"schema_lookup", "sql_validate_explain"}:
+        return "analyze"
+    if action in {"sql_generate", "sql_execute", "execution_approve", "execution_cancel"}:
+        return "execute"
+    return "chat"
+
+
+def _planned_tool_from_action(action: TurnAction) -> str:
+    mapping: dict[TurnAction, str] = {
+        "ignore": "",
+        "chat_reply": "",
+        "schema_lookup": "schema_lookup",
+        "sql_validate_explain": "sql_validate_explain",
+        "sql_generate": "sql_execute",
+        "sql_execute": "sql_execute",
+        "execution_approve": "execution_approve",
+        "execution_cancel": "execution_cancel",
+    }
+    return mapping.get(action, "")
+
+
+def _planned_tool_for_decision(action: TurnAction, execution_intent: str) -> str:
+    if action == "sql_generate" and execution_intent != "explicit":
+        return ""
+    return _planned_tool_from_action(action)
+
+
 def _build_routing_meta(state: AgentState) -> dict[str, Any]:
+    action = _coerce_turn_action(state.get("action"), default="ignore")
+    execution_intent = _coerce_str(state.get("execution_intent"), "none").strip().lower() or "none"
     return {
         "runtime_mode": state.get("runtime_mode") or "loop",
-        "action": state.get("action") or "",
+        "action": action,
+        "intent_mode": state.get("intent_mode") or _infer_intent_mode(action),
+        "execution_intent": execution_intent,
+        "needs_clarification": bool(state.get("needs_clarification")),
+        "turn_mode": state.get("turn_mode") or _mode_from_action(action),
+        "planned_tool": state.get("planned_tool")
+        or _planned_tool_for_decision(action, execution_intent),
         "confidence": state.get("action_confidence", 0.0),
         "reason": state.get("action_reason") or "",
         "route": state.get("route") or "",
@@ -251,6 +427,10 @@ def _node_reset_turn_state(state: AgentState) -> AgentState:
     return {
         "text": (state.get("text") or "").strip(),
         "should_respond": False,
+        "intent_mode": "chat",
+        "execution_intent": "none",
+        "needs_clarification": False,
+        "clarifying_question": "",
         "action": "ignore",
         "user_sql": None,
         "candidate_sql": None,
@@ -263,10 +443,13 @@ def _node_reset_turn_state(state: AgentState) -> AgentState:
         "action_confidence": 0.0,
         "action_reason": "",
         "fallback_used": False,
+        "turn_mode": "chat",
+        "planned_tool": "",
         "execution_policy": "",
         "execution_policy_reason": "",
         "cost_threshold_usd": _get_auto_execute_max_cost_usd(),
         "estimated_cost_usd": None,
+        "analysis_brief": _coerce_analysis_brief(state.get("analysis_brief")),
     }
 
 
@@ -289,19 +472,6 @@ def _node_ingest(state: AgentState) -> AgentState:
         conversation.append({"role": "user", "content": text})
 
     return {"text": text, "conversation": _clip_conversation(conversation)}
-
-
-def _node_classify_relevance(state: AgentState) -> AgentState:
-    should_respond = should_respond_to_message(
-        text=state.get("text", ""),
-        channel_type=state.get("channel_type", ""),
-        is_mention=bool(state.get("is_mention")),
-        is_thread_followup=bool(state.get("is_thread_followup")),
-        channel_id=state.get("channel_id"),
-    )
-    if should_respond:
-        return {"should_respond": True}
-    return {"should_respond": False, "action": "ignore", "route": "chat"}
 
 
 def _chat_planner_enabled() -> bool:
@@ -341,19 +511,58 @@ def _action_router_llm_enabled() -> bool:
     return _env_truthy(os.getenv("BIGQUERY_INTENT_LLM_ENABLED"), True)
 
 
-def _node_plan_turn_action(state: AgentState) -> AgentState:
+def _node_decide_turn(
+    state: AgentState, *, check_relevance: bool = True, plan_action: bool = True
+) -> AgentState:
     text = _coerce_str(state.get("text"))
     user_sql = _extract_user_sql(text)
-    pending_execution_sql = _coerce_str(state.get("pending_execution_sql")).strip()
-
-    if not _action_router_llm_enabled():
+    should_respond = True
+    if check_relevance:
+        should_respond = should_respond_to_message(
+            text=text,
+            channel_type=state.get("channel_type", ""),
+            is_mention=bool(state.get("is_mention")),
+            is_thread_followup=bool(state.get("is_thread_followup")),
+            channel_id=state.get("channel_id"),
+        )
+    if not should_respond:
         return {
-            "user_sql": user_sql,
-            "action": "chat_reply",
+            "should_respond": False,
+            "intent_mode": "chat",
+            "execution_intent": "none",
+            "needs_clarification": False,
+            "clarifying_question": "",
+            "action": "ignore",
             "route": "chat",
+            "turn_mode": "chat",
+            "planned_tool": "",
+        }
+    if not plan_action:
+        return {"should_respond": True}
+
+    pending_execution_sql = _coerce_str(state.get("pending_execution_sql")).strip()
+    if not _action_router_llm_enabled():
+        action: TurnAction = "chat_reply"
+        intent_mode = _infer_intent_mode(action)
+        execution_intent = _coerce_execution_intent(
+            None,
+            text=text,
+            action=action,
+        )
+        return {
+            "should_respond": True,
+            "intent_mode": intent_mode,
+            "execution_intent": execution_intent,
+            "needs_clarification": False,
+            "clarifying_question": "",
+            "user_sql": user_sql,
+            "action": action,
+            "route": _route_from_action(action),
             "action_confidence": 0.0,
             "action_reason": "llm_router_disabled",
             "fallback_used": True,
+            "turn_mode": _mode_from_action(action),
+            "planned_tool": _planned_tool_for_decision(action, execution_intent),
         }
 
     try:
@@ -370,6 +579,30 @@ def _node_plan_turn_action(state: AgentState) -> AgentState:
             has_user_sql_block=bool(user_sql),
         )
         action = _coerce_turn_action(raw.get("action"), default="chat_reply")
+        intent_mode = _coerce_intent_mode(raw.get("intent_mode"), action=action)
+        needs_clarification = bool(raw.get("needs_clarification"))
+        clarifying_question = _coerce_str(raw.get("clarifying_question")).strip()
+        execution_intent = _coerce_execution_intent(
+            raw.get("execution_intent"),
+            text=text,
+            action=action,
+        )
+        if (
+            action == "sql_generate"
+            and execution_intent != "explicit"
+            and not needs_clarification
+            and _needs_clarification_fallback(text)
+        ):
+            needs_clarification = True
+        if needs_clarification and not clarifying_question:
+            clarifying_question = (
+                "좋아요. 분석 방향을 정확히 맞추기 위해 기준을 먼저 정할게요. "
+                "어떤 서비스/지표/기간을 우선으로 볼까요?"
+            )
+        if needs_clarification and clarifying_question:
+            action = "chat_reply"
+            intent_mode = "analysis"
+            execution_intent = "none"
         confidence_raw = raw.get("confidence")
         if confidence_raw is None:
             confidence = 0.0
@@ -380,27 +613,52 @@ def _node_plan_turn_action(state: AgentState) -> AgentState:
                 confidence = 0.0
         reason = _coerce_str(raw.get("reason"), "llm routing")
         return {
+            "should_respond": True,
+            "intent_mode": intent_mode,
+            "execution_intent": execution_intent,
+            "needs_clarification": needs_clarification and bool(clarifying_question),
+            "clarifying_question": clarifying_question,
             "user_sql": user_sql,
             "action": action,
             "route": _route_from_action(action),
             "action_confidence": confidence,
             "action_reason": reason,
             "fallback_used": False,
+            "turn_mode": _mode_from_action(action),
+            "planned_tool": _planned_tool_for_decision(action, execution_intent),
         }
     except Exception as exc:
         logger.warning("bigquery_agent.action_router_fallback", extra={"error": str(exc)})
+        action = "chat_reply"
+        intent_mode = _infer_intent_mode(action)
+        execution_intent = _coerce_execution_intent(
+            None,
+            text=text,
+            action=action,
+        )
         return {
+            "should_respond": True,
+            "intent_mode": intent_mode,
+            "execution_intent": execution_intent,
+            "needs_clarification": False,
+            "clarifying_question": "",
             "user_sql": user_sql,
-            "action": "chat_reply",
-            "route": "chat",
+            "action": action,
+            "route": _route_from_action(action),
             "action_confidence": 0.0,
             "action_reason": "router_error_safe_fallback",
             "fallback_used": True,
+            "turn_mode": _mode_from_action(action),
+            "planned_tool": _planned_tool_for_decision(action, execution_intent),
         }
 
 
 def _node_chat_reply(state: AgentState) -> AgentState:
-    response_text = _plan_chat_response(state)
+    clarifying_question = _coerce_str(state.get("clarifying_question")).strip()
+    if bool(state.get("needs_clarification")) and clarifying_question:
+        response_text = clarifying_question
+    else:
+        response_text = _plan_chat_response(state)
     return {
         "route": "chat",
         "response_text": response_text,
@@ -509,9 +767,20 @@ def _node_compose_response(state: AgentState) -> AgentState:
         response_text = _coerce_str(state.get("response_text"), "")
         if not response_text:
             response_text = explanation.strip() or _plan_chat_response(state)
+        follow_ups = _extract_llm_follow_up_suggestions(result)
+        if follow_ups:
+            numbered = "\n".join(
+                f"{index}. {item}" for index, item in enumerate(follow_ups, start=1)
+            )
+            response_text = f"{response_text}\n\n다음에 해볼 수 있는 분석\n{numbered}"
+        updated_brief = _update_analysis_brief(state, follow_ups)
         conversation = list(state.get("conversation") or [])
         conversation.append({"role": "assistant", "content": response_text})
-        return {"response_text": response_text, "conversation": _clip_conversation(conversation)}
+        return {
+            "response_text": response_text,
+            "conversation": _clip_conversation(conversation),
+            "analysis_brief": updated_brief,
+        }
 
     parts: list[str] = []
     error = state.get("error")
@@ -524,8 +793,17 @@ def _node_compose_response(state: AgentState) -> AgentState:
 
     if not parts:
         parts.append("요청을 처리할 수 있는 SQL 컨텍스트를 찾지 못했습니다.")
+    follow_ups = _extract_llm_follow_up_suggestions(result)
+    if follow_ups:
+        numbered = "\n".join(f"{index}. {item}" for index, item in enumerate(follow_ups, start=1))
+        parts.append(f"다음에 해볼 수 있는 분석\n{numbered}")
     response_text = "\n\n".join(parts)
+    updated_brief = _update_analysis_brief(state, follow_ups)
 
     conversation = list(state.get("conversation") or [])
     conversation.append({"role": "assistant", "content": response_text})
-    return {"response_text": response_text, "conversation": _clip_conversation(conversation)}
+    return {
+        "response_text": response_text,
+        "conversation": _clip_conversation(conversation),
+        "analysis_brief": updated_brief,
+    }
