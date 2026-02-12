@@ -92,7 +92,7 @@ def chat_command(
                 )
             )
         else:
-            typer.echo(f"bot [{result.get('intent')}]:")
+            typer.echo(f"bot [{result.get('action')}]:")
             typer.echo(str(result.get("response_text") or ""))
 
         turn += 1

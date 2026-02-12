@@ -5,18 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, TypedDict
 
-Intent = Literal[
+TurnAction = Literal[
     "ignore",
-    "chat",
+    "chat_reply",
     "schema_lookup",
-    "text_to_sql",
-    "validate_sql",
-    "execute_sql",
-    "analysis_followup",
-    "data_workflow",
-    "free_chat",
+    "sql_validate_explain",
+    "sql_generate",
+    "sql_execute",
+    "execution_approve",
+    "execution_cancel",
 ]
 Route = Literal["data", "chat"]
+ExecutionPolicy = Literal["auto_execute", "approval_required", "blocked", ""]
 
 
 class ConversationMessage(TypedDict):
@@ -46,7 +46,7 @@ class AgentPayload(TypedDict):
 class AgentResult(TypedDict):
     thread_id: str
     backend: str
-    intent: Intent | None
+    action: TurnAction | None
     should_respond: bool
     response_text: str
     candidate_sql: str | None
@@ -86,19 +86,24 @@ class AgentState(TypedDict, total=False):
     history: list[ConversationMessage]
     conversation: list[ConversationMessage]
     should_respond: bool
-    intent: Intent
+    action: TurnAction
     user_sql: str | None
     candidate_sql: str | None
     dry_run: dict[str, Any]
+    last_candidate_sql: str | None
+    last_dry_run: dict[str, Any]
+    pending_execution_sql: str | None
+    pending_execution_dry_run: dict[str, Any]
     generation_result: dict[str, Any]
     can_execute: bool
     execution: dict[str, Any]
     response_text: str
     error: str | None
     route: Route
-    intent_confidence: float
-    intent_reason: str
-    planned_actions: list[str]
-    chat_result: dict[str, Any]
+    action_confidence: float
+    action_reason: str
     fallback_used: bool
-    planner_reason: str
+    execution_policy: ExecutionPolicy
+    execution_policy_reason: str
+    cost_threshold_usd: float
+    estimated_cost_usd: float | None

@@ -41,8 +41,8 @@ module-root = "src"
 [dependency-groups]
 dev = [
     "boto3-stubs[essential,lambda,ssm]",
-    "mypy>=1.19.1",
     "pre-commit>=4.3.0",
+    "pyright>=1.1.408",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
@@ -102,13 +102,3 @@ ignore = ["E203"]
 [tool.ruff.format]
 docstring-code-format = true
 quote-style = "double"
-
-[tool.mypy]
-python_version = "3.13"
-strict = true
-warn_unused_configs = true
-warn_unreachable = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
-files = ["src"]

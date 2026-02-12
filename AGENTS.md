@@ -10,6 +10,8 @@
 ## 핵심 경로
 - `src/data_bolt/app.py`: Litestar 앱 엔트리
 - `src/data_bolt/slack/`: Slack Bolt 앱, 핸들러, 백그라운드 처리
+- `src/data_bolt/tasks/bigquery/`: BigQuery SQL 생성/검증/LLM/RAG 모듈
+- `src/data_bolt/tasks/bigquery_agent/`: LangGraph 에이전트 노드/그래프/체크포인트/서비스
 - `template.yaml`: CloudFormation 스택 정의
 - `scripts/`: 배포/운영 스크립트 (`build_image.sh`, `deploy_stack.sh`, `sync_env.py`, `sync_secrets_to_ssm.sh` 등)
 - `justfile`: 개발/배포 커맨드 모음
@@ -41,6 +43,8 @@
 
 ## Project Structure & Module Organization
 - `src/data_bolt/`: Litestar app entry (`app.py`) and Slack Bolt integration in `slack/` (`app.py`, `handlers.py`, `background.py`).
+- `src/data_bolt/tasks/bigquery/`: BigQuery SQL 도메인 모듈 (`service.py`, `execution.py`, `llm_client.py` 등).
+- `src/data_bolt/tasks/bigquery_agent/`: LangGraph 오케스트레이션 모듈 (`nodes.py`, `graph.py`, `checkpoint.py`, `service.py`).
 - `tests/`: pytest suite (`test_*.py`, `conftest.py`).
 - `scripts/`: deployment and automation helpers (build, deploy, env sync, secrets sync).
 - `docs/`: operational notes (e.g., Slack guide).
@@ -70,6 +74,7 @@
 ## 환경 변수 / Security & Configuration Tips
 - `dot_env.example`을 복사해 `.env`를 만들고 값을 채웁니다.
 - 새 Lambda 환경변수는 `.env`에 `LAMBDA_` prefix로 추가한 뒤 `just sync-env`로 동기화합니다.
+- 실행 자동화 비용 임계값은 `LAMBDA_BIGQUERY_AUTO_EXECUTE_MAX_COST_USD`로 제어합니다. (기본 `1.0`, 미산출 비용은 승인 필요)
 - 별도 AWS 프로파일이 필요하면 `AWS_PROFILE=프로파일명 <command>` 형태로 실행합니다.
 - 기본 배포 타깃: `AWS_PROFILE=sandbox`, `STACK_NAME=data-bolt`, `AWS_REGION=ap-northeast-2`.
 - 로컬에서만 비밀값을 관리하고, 레포에 커밋하지 않습니다.
@@ -153,3 +158,9 @@ uv run python -m data_bolt.botctl.main simulate --text "어제 가입자 수를 
 
 ## 문서
 - `docs/SLACK_GUIDE.md`: 메시지 포맷, 실패 대응, 트러블슈팅
+- `docs/RUNTIME_EXECUTION_STRUCTURE.md`: 현재 코드 기준 실행 경로/그래프/분기 구조(구조 분석 시 우선 참조)
+
+## 실행 구조 문서화 규칙
+- 실행 구조를 분석하거나 설명할 때는 먼저 `docs/RUNTIME_EXECUTION_STRUCTURE.md`를 기준으로 확인합니다.
+- 실행 경로(엔트리포인트, 라우팅, 그래프 노드/엣지, checkpoint fallback, simulate 경로)가 변경되면 코드 변경과 함께 `docs/RUNTIME_EXECUTION_STRUCTURE.md`를 같은 PR/커밋에서 업데이트합니다.
+- 문서와 코드가 불일치하면 코드를 기준으로 즉시 문서를 수정하고, 리뷰/공유 시 수정된 문서 기준으로 설명합니다.

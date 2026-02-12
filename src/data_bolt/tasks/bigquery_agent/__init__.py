@@ -13,11 +13,14 @@ from .service import (
     _postgres_graph_cache,
     _postgres_setup_done,
     build_bigquery_sql,
-    classify_intent_with_laas,
     dry_run_bigquery_sql,
     execute_bigquery_sql,
-    plan_free_chat_with_laas,
+    explain_schema_lookup,
+    explain_sql_validation,
+    plan_free_chat,
+    plan_turn_action,
     run_bigquery_agent,
+    summarize_execution_result,
 )
 from .types import AgentPayload, AgentResult, AgentState
 
@@ -37,9 +40,12 @@ __all__ = [
     "_postgres_graph_cache",
     "_postgres_setup_done",
     "build_bigquery_sql",
-    "classify_intent_with_laas",
     "dry_run_bigquery_sql",
     "execute_bigquery_sql",
-    "plan_free_chat_with_laas",
+    "explain_schema_lookup",
+    "explain_sql_validation",
+    "plan_free_chat",
+    "plan_turn_action",
     "run_bigquery_agent",
+    "summarize_execution_result",
 ]

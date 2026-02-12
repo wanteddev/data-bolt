@@ -83,7 +83,7 @@ def _render_summary(run: SimulationRun) -> str:
     result = run["result"]
     lines = [
         f"mode: {run['mode']}",
-        f"intent: {result.get('intent')}",
+        f"action: {result.get('action')}",
         f"should_respond: {result.get('should_respond')}",
         f"candidate_sql: {result.get('candidate_sql')}",
         "response_text:",
@@ -109,7 +109,7 @@ async def _run_via_background(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(nested, dict):
         return nested
     return {
-        "intent": None,
+        "action": None,
         "should_respond": False,
         "candidate_sql": None,
         "response_text": json.dumps(outcome, ensure_ascii=False),
@@ -136,20 +136,15 @@ def _trace_reason(node: str, state: AgentState) -> str:
             if should_respond
             else "응답 조건 미충족으로 흐름을 종료합니다."
         )
-    if node == "classify_intent_llm":
+    if node == "plan_turn_action":
         return (
-            f"요청 의도를 '{state.get('intent')}'로 분류했습니다. "
-            f"confidence={state.get('intent_confidence')}, reason={state.get('intent_reason')}"
+            f"요청 액션을 '{state.get('action')}'로 선택했습니다. "
+            f"confidence={state.get('action_confidence')}, reason={state.get('action_reason')}"
         )
     if node == "route_decision":
         return f"라우팅 경로를 '{state.get('route')}'로 결정했습니다."
-    if node == "free_chat_planner":
-        return (
-            "자유 대화 planner가 액션을 선택했습니다. "
-            f"actions={state.get('planned_actions')}, reason={state.get('planner_reason')}"
-        )
-    if node == "data_generate_or_validate":
-        intent = state.get("intent")
+    if node in {"sql_generate", "sql_execute", "sql_validate_explain", "schema_lookup"}:
+        action = state.get("action")
         generation_result_raw = state.get("generation_result")
         generation_result = generation_result_raw if isinstance(generation_result_raw, dict) else {}
         meta_raw = generation_result.get("meta")
@@ -161,9 +156,13 @@ def _trace_reason(node: str, state: AgentState) -> str:
                 "RAG 스키마/용어집 검색 후 응답 생성을 수행했습니다. "
                 f"schema_docs={rag.get('schema_docs')}, glossary_docs={rag.get('glossary_docs')}"
             )
-        if intent in {"validate_sql", "execute_sql"} and state.get("candidate_sql"):
+        if action == "sql_validate_explain" and state.get("candidate_sql"):
             return "요청 내 SQL을 사용해 dry-run/검증 경로를 수행했습니다."
-        return "text-to-sql 생성 경로를 수행했습니다."
+        if action == "schema_lookup":
+            return "스키마/RAG 기반 설명 및 참고 SQL 생성을 수행했습니다."
+        if action == "sql_execute":
+            return "실행 대상 SQL을 준비했습니다."
+        return "sql 생성 경로를 수행했습니다."
     if node == "validate_candidate_sql":
         dry_run = state.get("dry_run") or {}
         if not state.get("candidate_sql"):
@@ -206,16 +205,15 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
 
     routing_raw = result.get("routing")
     routing = routing_raw if isinstance(routing_raw, dict) else {}
-    intent = str(result.get("intent") or "unknown")
+    action = str(result.get("action") or "unknown")
     confidence = routing.get("confidence")
     reason = routing.get("reason")
     route = routing.get("route")
-    actions = routing.get("actions")
     trace.append(
         {
-            "node": "classify_intent_llm",
+            "node": "plan_turn_action",
             "reason": (
-                f"요청 의도를 '{intent}'로 분류했습니다. "
+                f"요청 액션을 '{action}'로 선택했습니다. "
                 f"confidence={confidence if confidence is not None else '-'}, "
                 f"reason={reason or '-'}"
             ),
@@ -224,13 +222,6 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
     trace.append(
         {"node": "route_decision", "reason": f"라우팅 경로를 '{route or '-'}'로 결정했습니다."}
     )
-    if route == "chat":
-        trace.append(
-            {
-                "node": "free_chat_planner",
-                "reason": f"planner actions={actions if actions is not None else []}",
-            }
-        )
 
     generation_result_raw = result.get("generation_result")
     generation_result = generation_result_raw if isinstance(generation_result_raw, dict) else {}
@@ -252,12 +243,12 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
         )
 
     if route == "data" or result.get("candidate_sql"):
-        trace.append(
-            {
-                "node": "data_generate_or_validate",
-                "reason": "데이터 응답 생성/검증 단계를 수행했습니다.",
-            }
+        action_node = (
+            action
+            if action in {"schema_lookup", "sql_validate_explain", "sql_generate", "sql_execute"}
+            else "chat_reply"
         )
+        trace.append({"node": action_node, "reason": "액션 노드를 수행했습니다."})
     llm_raw = meta.get("llm")
     llm = llm_raw if isinstance(llm_raw, dict) else {}
     if not llm:
@@ -312,7 +303,7 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
             )
     trace.append({"node": "policy_gate", "reason": "실행 정책 점검을 수행했습니다."})
 
-    if intent == "execute_sql":
+    if action in {"sql_execute", "execution_approve", "execution_cancel", "sql_generate"}:
         execution_raw = result.get("execution")
         execution: dict[str, Any] = execution_raw if isinstance(execution_raw, dict) else {}
         if execution.get("success"):
@@ -343,7 +334,7 @@ def _build_result_from_state(state: AgentState, backend: str, thread_id: str) ->
     return {
         "thread_id": thread_id,
         "backend": backend,
-        "intent": state.get("intent"),
+        "action": state.get("action"),
         "should_respond": bool(state.get("should_respond")),
         "response_text": response_text,
         "candidate_sql": state.get("candidate_sql"),
@@ -352,13 +343,11 @@ def _build_result_from_state(state: AgentState, backend: str, thread_id: str) ->
         "generation_result": generation_result,
         "conversation_turns": len(state.get("conversation") or []),
         "routing": {
-            "intent": state.get("intent"),
-            "confidence": state.get("intent_confidence"),
-            "reason": state.get("intent_reason"),
-            "actions": state.get("planned_actions") or [],
+            "action": state.get("action"),
+            "confidence": state.get("action_confidence"),
+            "reason": state.get("action_reason"),
             "route": state.get("route"),
             "fallback_used": bool(state.get("fallback_used")),
-            "planner_reason": state.get("planner_reason"),
         },
     }
 
@@ -478,7 +467,11 @@ def simulate_command(
                     runs.append(_run_direct_with_trace(payload, trace and not as_json))
 
     if as_json:
-        typer.echo(json.dumps(runs if len(runs) > 1 else runs[0], ensure_ascii=False, indent=2))
+        typer.echo(
+            json.dumps(
+                runs if len(runs) > 1 else runs[0], ensure_ascii=False, indent=2, default=str
+            )
+        )
         return
 
     for index, run in enumerate(runs):

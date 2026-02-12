@@ -1,0 +1,85 @@
+digraph BigQueryFullGraph {
+  rankdir=LR;
+  compound=true;
+  splines=true;
+  nodesep=0.45;
+  ranksep=0.7;
+  fontname="Helvetica";
+
+  node [shape=box, style="rounded,filled", fillcolor="#F8FAFC", color="#334155", fontname="Helvetica", fontsize=10];
+  edge [color="#475569", fontname="Helvetica", fontsize=9];
+
+  START [shape=circle, label="START", style="filled", fillcolor="#DCFCE7", color="#16A34A"];
+  END [shape=doublecircle, label="END", style="filled", fillcolor="#FEE2E2", color="#DC2626"];
+
+  subgraph cluster_agent {
+    label="BigQuery Agent Graph";
+    color="#94A3B8";
+    style="rounded";
+
+    reset_turn_state;
+    classify_relevance;
+    clear_response;
+    ingest;
+    classify_intent_llm;
+    free_chat_planner;
+    data_generate_or_validate;
+    validate_candidate_sql;
+    policy_gate;
+    execute_sql;
+    free_chat_respond;
+    compose_response;
+
+    reset_turn_state -> classify_relevance;
+    classify_relevance -> ingest [label="proceed"];
+    classify_relevance -> clear_response [label="stop"];
+    ingest -> classify_intent_llm;
+    classify_intent_llm -> data_generate_or_validate [label="route_data"];
+    classify_intent_llm -> free_chat_planner [label="route_chat"];
+    free_chat_planner -> data_generate_or_validate [label="needs_data"];
+    free_chat_planner -> free_chat_respond [label="chat_only"];
+    data_generate_or_validate -> validate_candidate_sql;
+    validate_candidate_sql -> policy_gate;
+    policy_gate -> execute_sql [label="execute"];
+    policy_gate -> free_chat_respond [label="skip_chat"];
+    policy_gate -> compose_response [label="skip_data"];
+    execute_sql -> free_chat_respond [label="chat"];
+    execute_sql -> compose_response [label="data"];
+    free_chat_respond -> compose_response [label="chat|data"];
+  }
+
+  subgraph cluster_sql {
+    label="Internal SQL Workflow Graph (build_bigquery_sql)";
+    color="#93C5FD";
+    style="rounded,dashed";
+
+    wf_init_context [label="init_context"];
+    wf_generate_sql [label="generate_sql"];
+    wf_prepare_validation_target [label="prepare_validation_target"];
+    wf_dry_run_sql [label="dry_run_sql"];
+    wf_decide_refine_or_finish [label="decide_refine_or_finish"];
+    wf_refine_sql [label="refine_sql"];
+    wf_finalize_success [label="finalize_success"];
+    wf_finalize_failure [label="finalize_failure"];
+
+    wf_init_context -> wf_generate_sql;
+    wf_generate_sql -> wf_prepare_validation_target [label="SQL 추출 성공"];
+    wf_generate_sql -> wf_finalize_failure [label="SQL 없음/생성 실패"];
+    wf_prepare_validation_target -> wf_dry_run_sql;
+    wf_dry_run_sql -> wf_decide_refine_or_finish;
+    wf_decide_refine_or_finish -> wf_finalize_success [label="dry-run 성공"];
+    wf_decide_refine_or_finish -> wf_refine_sql [label="실패 && refine 가능"];
+    wf_decide_refine_or_finish -> wf_finalize_failure [label="실패 && 소진"];
+    wf_refine_sql -> wf_prepare_validation_target [label="refined SQL 생성"];
+    wf_refine_sql -> wf_refine_sql [label="refined SQL 없음 && 재시도 가능"];
+    wf_refine_sql -> wf_finalize_failure [label="refined SQL 없음 && 소진"];
+  }
+
+  START -> reset_turn_state;
+  clear_response -> END;
+  compose_response -> END;
+
+  data_generate_or_validate -> wf_init_context [style=dashed, color="#2563EB", label="text_to_sql 경로에서 내부 workflow 호출", lhead=cluster_sql];
+  wf_finalize_success -> validate_candidate_sql [style=dashed, color="#2563EB", label="validation/sql 결과 반환", ltail=cluster_sql, lhead=cluster_agent];
+  wf_finalize_failure -> validate_candidate_sql [style=dashed, color="#2563EB", label="실패 메타 반환", ltail=cluster_sql, lhead=cluster_agent];
+}

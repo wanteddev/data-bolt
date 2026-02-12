@@ -113,13 +113,25 @@ def _parse_json_response(content: str) -> dict[str, Any]:
     if fenced_match:
         candidates.append(fenced_match.group(1))
 
+    decoder = json.JSONDecoder()
     for candidate in candidates:
         try:
             parsed = json.loads(candidate)
             if isinstance(parsed, dict):
                 return parsed
         except Exception:
-            continue
+            pass
+
+        # Allow surrounding explanation text and recover the first JSON object.
+        for start, ch in enumerate(candidate):
+            if ch != "{":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(candidate[start:])
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
     return {}
 
 

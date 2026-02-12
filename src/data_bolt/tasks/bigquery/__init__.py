@@ -3,17 +3,27 @@
 from .parser import extract_sql_blocks
 from .service import (
     build_bigquery_sql,
-    classify_intent_with_laas,
     dry_run_bigquery_sql,
     execute_bigquery_sql,
-    plan_free_chat_with_laas,
+    explain_schema_lookup,
+    explain_sql_validation,
+    plan_free_chat,
+    plan_turn_action,
+    summarize_execution_result,
 )
+from .tools import DryRunTool, ExecuteQueryTool, RagContextTool
 
 __all__ = [
+    "DryRunTool",
+    "ExecuteQueryTool",
+    "RagContextTool",
     "build_bigquery_sql",
-    "classify_intent_with_laas",
     "dry_run_bigquery_sql",
     "execute_bigquery_sql",
+    "explain_schema_lookup",
+    "explain_sql_validation",
     "extract_sql_blocks",
-    "plan_free_chat_with_laas",
+    "plan_free_chat",
+    "plan_turn_action",
+    "summarize_execution_result",
 ]

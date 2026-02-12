@@ -12,10 +12,13 @@ logger = logging.getLogger(__name__)
 
 # Rebindable aliases for tests.
 build_bigquery_sql = nodes.build_bigquery_sql
-classify_intent_with_laas = nodes.classify_intent_with_laas
-plan_free_chat_with_laas = nodes.plan_free_chat_with_laas
+plan_turn_action = nodes.plan_turn_action
 dry_run_bigquery_sql = nodes.dry_run_bigquery_sql
 execute_bigquery_sql = nodes.execute_bigquery_sql
+explain_schema_lookup = nodes.explain_schema_lookup
+explain_sql_validation = nodes.explain_sql_validation
+plan_free_chat = nodes.plan_free_chat
+summarize_execution_result = nodes.summarize_execution_result
 
 _build_graph = checkpoint._build_graph
 _ensure_postgres_setup = checkpoint._ensure_postgres_setup
@@ -30,10 +33,13 @@ _dynamodb_graph_cache = checkpoint._dynamodb_graph_cache
 
 def _sync_node_dependencies() -> None:
     nodes.build_bigquery_sql = build_bigquery_sql
-    nodes.classify_intent_with_laas = classify_intent_with_laas
-    nodes.plan_free_chat_with_laas = plan_free_chat_with_laas
+    nodes.plan_turn_action = plan_turn_action
     nodes.dry_run_bigquery_sql = dry_run_bigquery_sql
     nodes.execute_bigquery_sql = execute_bigquery_sql
+    nodes.explain_schema_lookup = explain_schema_lookup
+    nodes.explain_sql_validation = explain_sql_validation
+    nodes.plan_free_chat = plan_free_chat
+    nodes.summarize_execution_result = summarize_execution_result
 
 
 def _sync_checkpoint_dependencies() -> None:
@@ -144,7 +150,7 @@ def run_bigquery_agent(payload: AgentPayload) -> AgentResult:
     return {
         "thread_id": input_data.thread_id,
         "backend": resolved_backend,
-        "intent": state.get("intent"),
+        "action": state.get("action"),
         "should_respond": bool(state.get("should_respond")),
         "response_text": response_text,
         "candidate_sql": state.get("candidate_sql"),

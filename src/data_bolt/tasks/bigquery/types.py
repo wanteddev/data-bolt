@@ -38,17 +38,31 @@ class ExecutionResult(TypedDict, total=False):
     preview_rows: list[dict[str, Any]]
 
 
-class IntentResult(TypedDict, total=False):
-    intent: str
+class TurnActionResult(TypedDict, total=False):
+    action: str
     confidence: float
     reason: str
-    actions: list[str]
 
 
 class ChatPlanResult(TypedDict, total=False):
     assistant_response: str
-    actions: list[str]
-    action_reason: str
+
+
+class ExecutionInsightResult(TypedDict, total=False):
+    summary: str
+    insight: str
+    follow_up_questions: list[str]
+
+
+class SchemaLookupResult(TypedDict, total=False):
+    response_text: str
+    reference_sql: str | None
+    meta: dict[str, Any]
+
+
+class SQLValidationExplainResult(TypedDict, total=False):
+    response_text: str
+    meta: dict[str, Any]
 
 
 class SQLBuildResult(TypedDict, total=False):
@@ -58,3 +72,29 @@ class SQLBuildResult(TypedDict, total=False):
     validation: ValidationResult
     error: str
     meta: dict[str, Any]
+
+
+class SQLWorkflowState(TypedDict, total=False):
+    question: str
+    table_info: str
+    glossary_info: str
+    history: list[dict[str, Any]]
+    images: list[dict[str, Any]]
+    instruction_type: str
+    max_refine_attempts: int
+    refine_attempts: int
+    current_sql: str
+    generated_sql: str | None
+    explanation: str
+    raw_response: JsonValue
+    response: SQLBuildResult
+    dry_run_success: bool
+    dry_run_meta: dict[str, Any]
+    validation_meta: ValidationResult
+    error: str | None
+    provider: str
+    llm_meta: dict[str, Any]
+    workflow_trace: list[str]
+    refine_candidate_found: bool
+    continue_refine: bool
+    dependencies: dict[str, Any]

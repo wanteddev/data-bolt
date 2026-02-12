@@ -1,0 +1,39 @@
+digraph BigQueryAgentCurrent {
+  rankdir=LR;
+  graph [fontname="Helvetica", fontsize=11, labelloc=t, label="BigQuery Agent Graph (Current)"];
+  node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#334155", fontname="Helvetica", fontsize=10];
+  edge [color="#475569", fontname="Helvetica", fontsize=9];
+
+  START [shape=circle, style="filled", fillcolor="#dcfce7", color="#166534", label="START"];
+  END [shape=doublecircle, style="filled", fillcolor="#fee2e2", color="#991b1b", label="END"];
+
+  reset_turn_state;
+  classify_relevance;
+  ingest;
+  clear_response;
+  classify_intent_llm;
+  data_generate_or_validate;
+  validate_candidate_sql;
+  policy_gate;
+  execute_sql;
+  compose_response;
+
+  START -> reset_turn_state;
+  reset_turn_state -> classify_relevance;
+
+  classify_relevance -> ingest [label="proceed"];
+  classify_relevance -> clear_response [label="stop"];
+
+  ingest -> classify_intent_llm;
+  clear_response -> END;
+
+  classify_intent_llm -> data_generate_or_validate;
+  data_generate_or_validate -> validate_candidate_sql;
+  validate_candidate_sql -> policy_gate;
+
+  policy_gate -> execute_sql [label="execute"];
+  policy_gate -> compose_response [label="skip"];
+
+  execute_sql -> compose_response;
+  compose_response -> END;
+}

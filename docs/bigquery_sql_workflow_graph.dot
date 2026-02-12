@@ -1,0 +1,42 @@
+digraph BigQuerySQLWorkflow {
+  rankdir=LR;
+  splines=true;
+  nodesep=0.5;
+  ranksep=0.7;
+  fontname="Helvetica";
+
+  node [shape=box, style="rounded,filled", fillcolor="#F8FAFC", color="#334155", fontname="Helvetica", fontsize=11];
+  edge [color="#475569", fontname="Helvetica", fontsize=10];
+
+  START [shape=circle, label="START", style="filled", fillcolor="#DCFCE7", color="#16A34A"];
+  END [shape=doublecircle, label="END", style="filled", fillcolor="#FEE2E2", color="#DC2626"];
+
+  init_context;
+  generate_sql;
+  prepare_validation_target;
+  dry_run_sql;
+  decide_refine_or_finish;
+  refine_sql;
+  finalize_success;
+  finalize_failure;
+
+  START -> init_context;
+  init_context -> generate_sql;
+
+  generate_sql -> prepare_validation_target [label="SQL 추출 성공"];
+  generate_sql -> finalize_failure [label="SQL 없음 / 생성 실패"];
+
+  prepare_validation_target -> dry_run_sql;
+  dry_run_sql -> decide_refine_or_finish;
+
+  decide_refine_or_finish -> finalize_success [label="dry-run 성공"];
+  decide_refine_or_finish -> refine_sql [label="dry-run 실패 && refine 가능"];
+  decide_refine_or_finish -> finalize_failure [label="dry-run 실패 && refine 소진"];
+
+  refine_sql -> prepare_validation_target [label="refined SQL 생성"];
+  refine_sql -> refine_sql [label="refined SQL 없음 && 재시도 가능"];
+  refine_sql -> finalize_failure [label="refined SQL 없음 && 재시도 소진"];
+
+  finalize_success -> END;
+  finalize_failure -> END;
+}

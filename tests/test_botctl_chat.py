@@ -25,7 +25,7 @@ def test_chat_uses_same_thread_ts_across_turns(monkeypatch) -> None:
             "payload": payload,
             "result": {
                 "backend": "memory",
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -52,7 +52,7 @@ def test_chat_json_outputs_turn_results(monkeypatch) -> None:
             "trace": [{"node": "compose_response", "reason": "ok"}],
             "result": {
                 "backend": "memory",
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -81,7 +81,7 @@ def test_chat_trace_mode_outputs_trace_line(monkeypatch) -> None:
             "payload": payload,
             "result": {
                 "backend": "memory",
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -104,7 +104,7 @@ def test_chat_banner_shows_dynamodb_backend(monkeypatch) -> None:
             "payload": payload,
             "result": {
                 "backend": "dynamodb",
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",

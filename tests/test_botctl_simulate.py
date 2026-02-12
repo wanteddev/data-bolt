@@ -25,7 +25,7 @@ def test_simulate_with_text_outputs_summary(monkeypatch) -> None:
             "payload": payload,
             "trace": [{"node": "compose_response", "reason": "ok"}],
             "result": {
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "안녕하세요! 무엇을 도와드릴까요?",
@@ -36,7 +36,7 @@ def test_simulate_with_text_outputs_summary(monkeypatch) -> None:
 
     result = runner.invoke(app, ["simulate", "--text", "안녕하세요"])
     assert result.exit_code == 0
-    assert "intent: chat" in result.output
+    assert "action: chat_reply" in result.output
     assert "response_text:" in result.output
 
 
@@ -48,7 +48,7 @@ def test_simulate_with_case_outputs_json(monkeypatch) -> None:
             "payload": payload,
             "trace": [{"node": "compose_response", "reason": "ok"}],
             "result": {
-                "intent": "text_to_sql",
+                "action": "sql_generate",
                 "should_respond": True,
                 "candidate_sql": "SELECT 1;",
                 "response_text": "sql response",
@@ -71,7 +71,7 @@ def test_simulate_with_file_runs_multiple_cases(monkeypatch) -> None:
             "payload": payload,
             "trace": [{"node": "compose_response", "reason": "ok"}],
             "result": {
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": payload["text"],
@@ -90,7 +90,7 @@ def test_simulate_with_file_runs_multiple_cases(monkeypatch) -> None:
 def test_simulate_via_background_uses_background_path(monkeypatch) -> None:
     async def fake_background(payload: dict[str, Any]) -> dict[str, Any]:
         return {
-            "intent": "chat",
+            "action": "chat_reply",
             "should_respond": True,
             "candidate_sql": None,
             "response_text": f"bg:{payload['text']}",
@@ -112,7 +112,7 @@ def test_simulate_no_trace_disables_trace_output(monkeypatch) -> None:
             "mode": "direct",
             "payload": payload,
             "result": {
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -142,7 +142,7 @@ def test_simulate_allows_thread_ts_on_postgres_backend(monkeypatch) -> None:
             "payload": payload,
             "result": {
                 "backend": "postgres",
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -167,7 +167,7 @@ def test_simulate_allows_thread_ts_on_dynamodb_backend(monkeypatch) -> None:
             "payload": payload,
             "result": {
                 "backend": "dynamodb",
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -189,7 +189,7 @@ def test_simulate_persistent_trace_includes_rag_and_laas(monkeypatch) -> None:
             "mode": "direct",
             "payload": payload,
             "result": {
-                "intent": "text_to_sql",
+                "action": "sql_generate",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
@@ -197,7 +197,7 @@ def test_simulate_persistent_trace_includes_rag_and_laas(monkeypatch) -> None:
                     "route": "data",
                     "confidence": 0.9,
                     "reason": "data request",
-                    "actions": ["text_to_sql"],
+                    "actions": ["sql_generate"],
                 },
                 "generation_result": {
                     "meta": {
@@ -223,9 +223,9 @@ def test_simulate_persistent_trace_includes_rag_and_laas(monkeypatch) -> None:
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
     nodes = [entry["node"] for entry in parsed["trace"]]
-    assert "classify_intent_llm" in nodes
+    assert "plan_turn_action" in nodes
     assert "route_decision" in nodes
-    assert "data_generate_or_validate" in nodes
+    assert "sql_generate" in nodes
     assert "rag_context_lookup" in nodes
     assert "laas_completion" in nodes
 
@@ -237,14 +237,14 @@ def test_simulate_trace_includes_dry_run_validation_node(monkeypatch) -> None:
             "mode": "direct",
             "payload": payload,
             "result": {
-                "intent": "text_to_sql",
+                "action": "sql_generate",
                 "should_respond": True,
                 "candidate_sql": "SELECT 1;",
                 "routing": {
                     "route": "data",
                     "confidence": 0.9,
                     "reason": "data request",
-                    "actions": ["text_to_sql"],
+                    "actions": ["sql_generate"],
                 },
                 "validation": {
                     "success": False,

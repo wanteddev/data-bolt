@@ -73,7 +73,7 @@ def test_simulate_loads_env_file_before_run(tmp_path: Path, monkeypatch) -> None
             "payload": payload,
             "trace": [],
             "result": {
-                "intent": "chat",
+                "action": "chat_reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",

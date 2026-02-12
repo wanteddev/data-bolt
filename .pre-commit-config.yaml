@@ -6,10 +6,8 @@ repos:
         args: ["--fix", "--show-fixes"]
       - id: ruff-format
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.19.1
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.408
     hooks:
-      - id: mypy
-        entry: uv run mypy src/
+      - id: pyright
         pass_filenames: false
-        types_or: [python, pyi]

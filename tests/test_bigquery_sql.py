@@ -178,10 +178,110 @@ def test_build_bigquery_sql_refines_when_initial_dry_run_fails(monkeypatch) -> N
     assert result["validation"]["refined"] is True
 
 
+def test_build_bigquery_sql_workflow_graph_refines_when_enabled(monkeypatch) -> None:
+    def fake_generate(*_args, **_kwargs) -> dict:
+        content = (
+            '{"sql": "SELEC 1;","explanation": "bad sql","assumptions": "","validation_steps": []}'
+        )
+        return {"choices": [{"message": {"content": content}}]}
+
+    attempts: dict[str, int] = {"count": 0}
+
+    def fake_dry_run(sql: str):
+        attempts["count"] += 1
+        if "SELEC 1" in sql:
+            return False, {"error": "Syntax error", "total_bytes_processed": None}
+        return True, {"total_bytes_processed": 1024, "job_id": "job2", "cache_hit": False}
+
+    monkeypatch.setenv("BIGQUERY_SQL_WORKFLOW_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_REFINE_MAX_ATTEMPTS", "1")
+    monkeypatch.setattr(bigquery_sql, "generate_bigquery_response", fake_generate)
+    monkeypatch.setattr(bigquery_sql, "_dry_run_sql", fake_dry_run)
+    monkeypatch.setattr(bigquery_sql, "refine_bigquery_sql", lambda **_kwargs: "SELECT 1;")
+
+    result = bigquery_sql.build_bigquery_sql({"text": "count users", "table_info": "ddl"})
+
+    assert attempts["count"] >= 2
+    assert result["validation"]["success"] is True
+    assert result["validation"]["refined"] is True
+    assert result["meta"]["workflow"]["enabled"] is True
+    assert "generate_sql" in result["meta"]["workflow"]["trace"]
+    assert "dry_run_sql" in result["meta"]["workflow"]["trace"]
+    assert "refine_sql" in result["meta"]["workflow"]["trace"]
+
+
+def test_build_bigquery_sql_workflow_graph_respects_max_attempts_zero(monkeypatch) -> None:
+    monkeypatch.setenv("BIGQUERY_SQL_WORKFLOW_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_REFINE_MAX_ATTEMPTS", "0")
+    monkeypatch.setattr(
+        bigquery_sql,
+        "generate_bigquery_response",
+        lambda **_kwargs: {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"sql":"SELEC 1;","explanation":"bad","assumptions":"","validation_steps":[]}'
+                    }
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_sql,
+        "_dry_run_sql",
+        lambda _sql: (False, {"error": "Syntax error", "total_bytes_processed": None}),
+    )
+    refine_calls: dict[str, int] = {"count": 0}
+    monkeypatch.setattr(
+        bigquery_sql,
+        "refine_bigquery_sql",
+        lambda **_kwargs: (
+            refine_calls.__setitem__("count", refine_calls["count"] + 1) or "SELECT 1;"
+        ),
+    )
+
+    result = bigquery_sql.build_bigquery_sql({"text": "count users", "table_info": "ddl"})
+
+    assert result["validation"]["success"] is False
+    assert result["validation"]["attempts"] == 1
+    assert refine_calls["count"] == 0
+
+
+def test_build_bigquery_sql_workflow_graph_refine_no_sql_blocks(monkeypatch) -> None:
+    monkeypatch.setenv("BIGQUERY_SQL_WORKFLOW_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BIGQUERY_REFINE_MAX_ATTEMPTS", "1")
+    monkeypatch.setattr(
+        bigquery_sql,
+        "generate_bigquery_response",
+        lambda **_kwargs: {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"sql":"SELEC 1;","explanation":"bad","assumptions":"","validation_steps":[]}'
+                    }
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        bigquery_sql,
+        "_dry_run_sql",
+        lambda _sql: (False, {"error": "Syntax error", "total_bytes_processed": None}),
+    )
+    monkeypatch.setattr(bigquery_sql, "refine_bigquery_sql", lambda **_kwargs: "고쳐봤어요")
+
+    result = bigquery_sql.build_bigquery_sql({"text": "count users", "table_info": "ddl"})
+
+    assert result["validation"]["success"] is False
+    assert result["validation"]["attempts"] == 1
+    assert result["validation"]["refinement_error"] == "Refine produced no SQL blocks"
+    assert "finalize_failure" in result["meta"]["workflow"]["trace"]
+
+
 def test_build_bigquery_sql_skips_rag_for_general_chat(monkeypatch) -> None:
     called = {"rag": False}
 
-    def fake_rag(_question: str) -> dict:
+    def fake_rag(*, question: str) -> dict:
         called["rag"] = True
         return {"table_info": "x", "glossary_info": "y", "meta": {"attempted": True}}
 
@@ -195,6 +295,7 @@ def test_build_bigquery_sql_skips_rag_for_general_chat(monkeypatch) -> None:
 
     assert called["rag"] is False
     assert result["meta"]["context_source"] == "provided"
+    assert result["meta"]["workflow"]["enabled"] is False
 
 
 def test_llm_chat_completion_defaults_to_laas(monkeypatch) -> None:
@@ -284,7 +385,7 @@ def test_llm_chat_completion_anthropic_compatible_formats_system(monkeypatch) ->
     assert captured["timeout"] == 7.0
 
 
-def test_classify_intent_with_laas_parses_anthropic_content(monkeypatch) -> None:
+def test_plan_turn_action_parses_anthropic_content(monkeypatch) -> None:
     monkeypatch.setattr(
         bigquery_sql,
         "_llm_chat_completion",
@@ -293,7 +394,7 @@ def test_classify_intent_with_laas_parses_anthropic_content(monkeypatch) -> None
                 {
                     "type": "text",
                     "text": (
-                        '{"intent":"free_chat","confidence":0.9,'
+                        '{"action":"chat_reply","confidence":0.9,'
                         '"reason":"anthropic","actions":["none"]}'
                     ),
                 }
@@ -301,7 +402,7 @@ def test_classify_intent_with_laas_parses_anthropic_content(monkeypatch) -> None
         },
     )
 
-    result = bigquery_sql.classify_intent_with_laas(
+    result = bigquery_sql.plan_turn_action(
         text="안녕",
         history=[],
         channel_type="im",
@@ -309,8 +410,8 @@ def test_classify_intent_with_laas_parses_anthropic_content(monkeypatch) -> None
         is_thread_followup=False,
     )
 
-    assert result["intent"] == "free_chat"
-    assert result["actions"] == ["none"]
+    assert result["action"] == "chat_reply"
+    assert result["reason"] == "anthropic"
 
 
 def test_build_bigquery_sql_meta_uses_llm(monkeypatch) -> None:
@@ -370,7 +471,18 @@ def test_parse_json_response_supports_fenced_json() -> None:
     assert parsed["explanation"] == "안녕하세요"
 
 
-def test_build_bigquery_sql_does_not_promote_plain_text_to_sql(monkeypatch) -> None:
+def test_parse_json_response_supports_wrapped_json() -> None:
+    content = (
+        "분석 결과입니다.\n"
+        '{"sql":"SELECT 1;","explanation":"ok","assumptions":[],"validation_steps":[]}\n'
+        "필요하면 조건을 더 주세요."
+    )
+    parsed = bigquery_sql._parse_json_response(content)
+    assert parsed["sql"] == "SELECT 1;"
+    assert parsed["explanation"] == "ok"
+
+
+def test_build_bigquery_sql_does_not_promote_plain_sql_generate(monkeypatch) -> None:
     monkeypatch.setattr(
         bigquery_sql,
         "generate_bigquery_response",
