@@ -96,7 +96,6 @@ class AgentState(TypedDict, total=False):
     pending_execution_sql: str | None
     pending_execution_dry_run: dict[str, Any]
     generation_result: dict[str, Any]
-    can_execute: bool
     execution: dict[str, Any]
     response_text: str
     error: str | None
@@ -108,3 +107,6 @@ class AgentState(TypedDict, total=False):
     execution_policy_reason: str
     cost_threshold_usd: float
     estimated_cost_usd: float | None
+    tool_calls: list[dict[str, Any]]
+    turn: dict[str, Any]
+    agent_should_finalize: bool

@@ -16,60 +16,29 @@
 1. `simulate`/`chat` 명령이 `run_bigquery_agent()`를 직접 호출
 2. `--via-background`는 `/slack/background` 경로를 로컬 재현
 
-## 1.1) 런타임 선택
-
-- 환경변수 `BIGQUERY_AGENT_RUNTIME_MODE`로 런타임을 선택한다.
-- 기본값: `loop`
-- 값:
-  - `loop`: 단순 graph + 단일 `agent_loop` 노드에서 tool 호출 루프 수행
-  - `graph`: 기존 다중 노드 LangGraph 실행
-- 운영 이슈 시 `BIGQUERY_AGENT_RUNTIME_MODE=graph`로 즉시 롤백 가능
-
 ## 2) BigQuery Agent 실행 구조 (thread 단위)
-
-### A. loop 런타임(기본)
 
 구현:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py`
 
 토폴로지:
 1. `START`
-2. `agent_loop`
-3. `END`
+2. `prepare_node`
+3. `agent_node`
+4. `tools_node`
+5. `finalize_node`
+6. `END`
 
-`agent_loop` 내부 흐름:
-1. turn 상태 초기화
-2. relevance 판정 (false면 빈 응답 종료)
-3. ingest + 액션 플래너
-4. 액션별 tool-like 처리 (`chat_reply`, `schema_lookup`, `sql_validate_explain`, `sql_generate`, `sql_execute`, 승인/취소)
-5. SQL 실행은 `guarded_execute_tool` 단일 관문에서만 수행
-6. 최종 응답 compose
-
-### B. graph 런타임(롤백)
-
-그래프 정의: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/graph.py`
-
-노드/분기:
-1. `reset_turn_state`
-2. `classify_relevance`
-3. relevance=false -> `clear_response` -> `END`
-4. relevance=true -> `ingest` -> `plan_turn_action`
-5. `plan_turn_action` 결과(`action`)에 따라 분기
-- `chat_reply` -> `chat_reply` -> `compose_response`
-- `schema_lookup` -> `schema_lookup` -> `compose_response`
-- `sql_validate_explain` -> `sql_validate_explain` -> `compose_response`
-- `sql_generate` -> `validate_candidate_sql` -> `policy_gate`
-- `sql_execute` -> `validate_candidate_sql` -> `policy_gate`
-- `execution_approve`/`execution_cancel` -> `policy_gate`
-6. `policy_gate`
-- `can_execute=true` -> `execute_sql` -> `compose_response`
-- 아니면 `compose_response`
-7. `END`
-
-핵심 포인트:
-- 의도(intent) 대신 **단일 액션(action)** 라우팅을 사용한다.
-- `schema_lookup`, `sql_validate_explain`는 실행 경로로 가지 않는다.
-- 실제 실행은 `policy_gate` 통과 시점에만 가능하다.
+핵심 흐름:
+1. `prepare_node`: turn 초기화 + relevance 판정 + ingest
+2. `agent_node`: LLM 기반 action/tool_call 결정, 필요 시 SQL 생성(`sql_generate`)
+3. `agent_node` 조건부 분기
+- tool_calls 있음 -> `tools_node`
+- tool_calls 없음 -> `finalize_node`
+4. `tools_node`: LLM 없이 tool registry를 통해 기계적으로 실행 후 `agent_node`로 복귀
+5. `tools_node`는 실행 가드/HITL를 집행하며 승인 대기 시 `execution.status=pending_approval` 및 `execution.request`를 기록
+6. `agent_node <-> tools_node` 루프는 `turn.max_steps`까지 반복 가능
+7. `finalize_node`: `compose_response` 수행 후 종료
 
 ## 3) 액션 라우터 계약
 
@@ -93,19 +62,18 @@
 
 ## 4) 액션별 책임
 
-- `chat_reply`: 자유 대화 응답 생성(도구 실행 없음)
-- `schema_lookup`: 스키마/RAG 설명 + 참고 SQL 제시 가능(실행 금지)
-- `sql_validate_explain`: 사용자 SQL/직전 SQL dry-run 검증 + 설명(실행 금지)
-- `sql_generate`: SQL 생성(+검증) 후 실행 정책 판단
-- `sql_execute`: 실행 대상 SQL 선택/검증 후 실행 정책 판단
-- `execution_approve`/`execution_cancel`: 승인 상태만 처리, 최종 강제는 `policy_gate`
+- `chat_reply`: agent가 최종 자연어 응답 생성(도구 실행 없음)
+- `schema_lookup`: agent가 `schema_lookup(...)` tool_call 생성, tools가 실행
+- `sql_validate_explain`: agent가 `sql_validate_explain(sql=...)` tool_call 생성, tools가 dry-run 검증 수행
+- `sql_generate`: agent가 SQL 생성(LLM) 후 필요 시 `sql_execute(sql=...)` 등 후속 tool_call 생성
+- `sql_execute`: agent가 대상 SQL args를 구성, tools가 guard + 실행/보류 처리
+- `execution_approve`/`execution_cancel`: agent가 승인/취소 tool_call 생성, tools가 pending request에 대해 집행
 
 ## 5) 실행 정책
 
-### A. loop 런타임
-
 구현:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/tools.py::GuardedExecuteTool.run`
+- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py::tools_node`
 
 정책 집행:
 1. read-only 단일 statement 여부
@@ -117,22 +85,7 @@
 핵심:
 - 실제 BigQuery execute 호출은 `GuardedExecuteTool` 내부 단일 경로에서만 허용
 - DML/DDL은 승인 여부와 무관하게 무조건 차단
-
-### B. graph 런타임(`policy_gate`)
-
-구현: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py::_node_policy_gate`
-
-검사 항목:
-1. read-only 단일 statement 여부
-2. dry-run 존재/성공 여부
-3. `BIGQUERY_MAX_BYTES_BILLED` 제한
-4. 비용 임계값(`BIGQUERY_AUTO_EXECUTE_MAX_COST_USD`) 비교
-5. 승인 대기/승인/취소 상태
-
-결과:
-- `auto_execute`
-- `approval_required`
-- `blocked`
+- 승인 필요 시 tools 노드는 실제 실행 대신 `PENDING_APPROVAL` 상태를 기록하고 종료한다.
 
 ## 6) SQL 생성 내부 워크플로
 
@@ -144,10 +97,9 @@
 
 ## 7) 체크포인터/캐시
 
-구현: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/checkpoint.py`
+구현: `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py`
 
-- `graph`와 `loop` 런타임 각각 독립 캐시를 유지한다.
-- 공통 백엔드:
+- 백엔드:
   - `memory`: in-memory saver + compiled graph 재사용
   - `postgres`: 연결별 compiled graph/context 캐시
   - `dynamodb`: table/region/endpoint 키별 compiled graph 캐시
@@ -159,7 +111,7 @@
 ## 8) 변경 시 동기화 파일
 
 - 그래프/노드 계약 변경:
-- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/graph.py`
+- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py`
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py`
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/types.py`
 - 서비스 계약 변경:

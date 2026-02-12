@@ -83,14 +83,14 @@
 - Python 3.13, source under `src/` (module name `data_bolt`).
 - Formatting via Ruff (`line-length = 100`, double quotes). Run `uv run ruff format`.
 - Linting via Ruff rules `B`, `I`, `RUF`, `UP` and `uv run ruff check --fix`.
-- Type checking via strict mypy: `uv run mypy`.
+- Type checking via strict pyright: `uv run pyright`.
 - Use `snake_case` for functions/variables; tests named `test_*.py`.
 
 ## 테스트/품질
 ```bash
 uv run ruff check .
 uv run ruff format .
-uv run mypy src/
+uv run pyright
 uv run pytest
 ```
 

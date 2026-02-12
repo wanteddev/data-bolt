@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
-    from mypy_boto3_ssm import SSMClient
+
+    class SSMClient(Protocol):
+        def get_parameter(self, *, Name: str, WithDecryption: bool = False) -> dict[str, Any]: ...
+
 
 LAAS_DEFAULT_BASE_URL = "https://api-laas.wanted.co.kr"
 LAAS_EMPTY_PRESET_HASH = "2e1cfa82b035c26cbbbdae632cea070514eb8b773f616aaeaf668e2f0be8f10d"
@@ -47,7 +50,7 @@ class _SSMParameterLoader:
         if self._client is None:
             import boto3
 
-            self._client = boto3.client("ssm")
+            self._client = cast("SSMClient", boto3.client("ssm"))
 
         response = self._client.get_parameter(Name=key, WithDecryption=with_decryption)
         value = str(response["Parameter"]["Value"])

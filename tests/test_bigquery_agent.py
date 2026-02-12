@@ -42,7 +42,6 @@ def _default_plan_turn_action(**kwargs):
 @pytest.fixture(autouse=True)
 def _default_env(monkeypatch):
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "graph")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_ACTION_ROUTER_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_CHAT_ALLOW_EXECUTE_IN_CHAT", "false")
@@ -56,11 +55,6 @@ def _default_env(monkeypatch):
     bigquery_agent._postgres_context_cache.clear()
     bigquery_agent._postgres_setup_done.clear()
     bigquery_agent._dynamodb_graph_cache.clear()
-    bigquery_agent._loop_memory_runtime_cache.clear()
-    bigquery_agent._loop_postgres_graph_cache.clear()
-    bigquery_agent._loop_postgres_context_cache.clear()
-    bigquery_agent._loop_postgres_setup_done.clear()
-    bigquery_agent._loop_dynamodb_graph_cache.clear()
 
 
 def test_run_bigquery_agent_ignores_irrelevant_channel_message() -> None:
@@ -903,7 +897,7 @@ def test_run_bigquery_agent_fallbacks_only_for_checkpoint_errors(monkeypatch) ->
     def fake_pg_invoke(*_args, **_kwargs):
         raise RuntimeError("generation failed")
 
-    monkeypatch.setattr(bigquery_agent, "_invoke_graph_with_postgres", fake_pg_invoke)
+    monkeypatch.setattr(bigquery_agent, "_invoke_with_postgres", fake_pg_invoke)
 
     with pytest.raises(RuntimeError, match="generation failed"):
         bigquery_agent.run_bigquery_agent(
@@ -922,7 +916,7 @@ def test_run_bigquery_agent_checkpoint_error_is_fail_fast_by_default(monkeypatch
 
     monkeypatch.setattr(
         bigquery_agent,
-        "_invoke_graph_with_postgres",
+        "_invoke_with_postgres",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             ValueError("LANGGRAPH_POSTGRES_URI is not set")
         ),
@@ -956,8 +950,8 @@ def test_run_bigquery_agent_fallbacks_to_memory_when_opted_in(monkeypatch) -> No
             "conversation": [],
         }
 
-    monkeypatch.setattr(bigquery_agent, "_invoke_graph_with_postgres", fake_pg_invoke)
-    monkeypatch.setattr(bigquery_agent, "_invoke_graph_with_memory", fake_mem_invoke)
+    monkeypatch.setattr(bigquery_agent, "_invoke_with_postgres", fake_pg_invoke)
+    monkeypatch.setattr(bigquery_agent, "_invoke_with_memory", fake_mem_invoke)
 
     result = bigquery_agent.run_bigquery_agent(
         {
@@ -1002,7 +996,7 @@ def test_run_bigquery_agent_uses_dynamodb_backend(monkeypatch) -> None:
             "conversation": [],
         }
 
-    monkeypatch.setattr(bigquery_agent, "_invoke_graph_with_dynamodb", fake_ddb_invoke)
+    monkeypatch.setattr(bigquery_agent, "_invoke_with_dynamodb", fake_ddb_invoke)
 
     result = bigquery_agent.run_bigquery_agent(
         {
@@ -1025,7 +1019,7 @@ def test_run_bigquery_agent_dynamodb_fail_fast(monkeypatch) -> None:
     def fake_ddb_invoke(*_args, **_kwargs):
         raise RuntimeError("dynamodb unavailable")
 
-    monkeypatch.setattr(bigquery_agent, "_invoke_graph_with_dynamodb", fake_ddb_invoke)
+    monkeypatch.setattr(bigquery_agent, "_invoke_with_dynamodb", fake_ddb_invoke)
 
     with pytest.raises(RuntimeError, match="dynamodb unavailable"):
         bigquery_agent.run_bigquery_agent(
@@ -1072,8 +1066,8 @@ def test_postgres_graph_is_compiled_once_per_connection(monkeypatch) -> None:
     )
 
     state = {"text": "q", "channel_type": "im"}
-    bigquery_agent._invoke_graph_with_postgres(state, "thread-1")
-    bigquery_agent._invoke_graph_with_postgres(state, "thread-2")
+    bigquery_agent._invoke_with_postgres(state, "thread-1")
+    bigquery_agent._invoke_with_postgres(state, "thread-2")
 
     assert compile_calls == 1
     assert enter_calls == 1
@@ -1108,8 +1102,8 @@ def test_dynamodb_graph_is_compiled_once_per_configuration(monkeypatch) -> None:
     monkeypatch.setattr(bigquery_agent, "_build_dynamodb_saver", fake_build_saver)
 
     state = {"text": "q", "channel_type": "im"}
-    bigquery_agent._invoke_graph_with_dynamodb(state, "thread-1")
-    bigquery_agent._invoke_graph_with_dynamodb(state, "thread-2")
+    bigquery_agent._invoke_with_dynamodb(state, "thread-1")
+    bigquery_agent._invoke_with_dynamodb(state, "thread-2")
 
     assert compile_calls == 1
     assert saver_calls == 1
@@ -1159,7 +1153,6 @@ def test_run_bigquery_agent_persists_state_with_postgres(monkeypatch) -> None:
 
 
 def test_run_bigquery_agent_loop_mode_executes_low_cost_sql(monkeypatch) -> None:
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "loop")
     monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
     monkeypatch.setattr(
         bigquery_agent,
@@ -1212,7 +1205,6 @@ def test_run_bigquery_agent_loop_mode_executes_low_cost_sql(monkeypatch) -> None
 
 
 def test_run_bigquery_agent_loop_mode_requires_approval_for_high_cost(monkeypatch) -> None:
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "loop")
     monkeypatch.setenv("BIGQUERY_AUTO_EXECUTE_MAX_COST_USD", "1.0")
     monkeypatch.setattr(
         bigquery_agent,

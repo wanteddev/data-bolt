@@ -173,13 +173,6 @@ def _trace_reason(node: str, state: AgentState) -> str:
                 f"bytes={dry_run.get('total_bytes_processed')}, cost={dry_run.get('estimated_cost_usd')}"
             )
         return f"BigQuery dry-run 검증이 실패했습니다. error={dry_run.get('error') or '-'}"
-    if node == "policy_gate":
-        if state.get("can_execute"):
-            return "실행 정책을 통과해 execute 단계로 진행합니다."
-        policy_execution: dict[str, Any] = state.get("execution") or {}
-        if policy_execution.get("error"):
-            return f"실행 정책에서 차단되었습니다: {policy_execution.get('error')}"
-        return "실행 요청이 아니거나 실행 조건 미충족으로 execute를 건너뜁니다."
     if node == "execute_sql":
         execute_result: dict[str, Any] = state.get("execution") or {}
         success = execute_result.get("success")
@@ -205,7 +198,6 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
 
     routing_raw = result.get("routing")
     routing = routing_raw if isinstance(routing_raw, dict) else {}
-    runtime_mode = str(routing.get("runtime_mode") or "graph")
     action = str(result.get("action") or "unknown")
     confidence = routing.get("confidence")
     reason = routing.get("reason")
@@ -304,8 +296,7 @@ def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
             )
     executable_actions = {"sql_execute", "execution_approve", "execution_cancel", "sql_generate"}
     if action in executable_actions:
-        policy_node = "guarded_execute" if runtime_mode == "loop" else "policy_gate"
-        trace.append({"node": policy_node, "reason": "실행 정책 점검을 수행했습니다."})
+        trace.append({"node": "guarded_execute", "reason": "실행 정책 점검을 수행했습니다."})
         execution_raw = result.get("execution")
         execution: dict[str, Any] = execution_raw if isinstance(execution_raw, dict) else {}
         if execution.get("success"):

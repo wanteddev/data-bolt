@@ -50,17 +50,11 @@ def _reset_memory_state() -> None:
     bigquery_agent._postgres_context_cache.clear()
     bigquery_agent._postgres_setup_done.clear()
     bigquery_agent._dynamodb_graph_cache.clear()
-    bigquery_agent._loop_memory_runtime_cache.clear()
-    bigquery_agent._loop_postgres_graph_cache.clear()
-    bigquery_agent._loop_postgres_context_cache.clear()
-    bigquery_agent._loop_postgres_setup_done.clear()
-    bigquery_agent._loop_dynamodb_graph_cache.clear()
 
 
 def test_chat_e2e_generate_auto_executes_when_cost_is_low(monkeypatch) -> None:
     _reset_memory_state()
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "graph")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_ACTION_ROUTER_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_CHAT_PLANNER_ENABLED", "false")
@@ -91,7 +85,6 @@ def test_chat_e2e_generate_auto_executes_when_cost_is_low(monkeypatch) -> None:
 def test_chat_e2e_cancel_clears_pending(monkeypatch) -> None:
     _reset_memory_state()
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "graph")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_ACTION_ROUTER_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_CHAT_PLANNER_ENABLED", "false")
@@ -119,7 +112,6 @@ def test_chat_e2e_cancel_clears_pending(monkeypatch) -> None:
 def test_chat_e2e_previous_turn_sql_uses_approval_flow(monkeypatch) -> None:
     _reset_memory_state()
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "graph")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_ACTION_ROUTER_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_CHAT_PLANNER_ENABLED", "false")
@@ -152,7 +144,6 @@ def test_chat_e2e_previous_turn_sql_uses_approval_flow(monkeypatch) -> None:
 def test_chat_e2e_chat_turn_does_not_leak_sql(monkeypatch) -> None:
     _reset_memory_state()
     monkeypatch.setenv("LANGGRAPH_CHECKPOINT_BACKEND", "memory")
-    monkeypatch.setenv("BIGQUERY_AGENT_RUNTIME_MODE", "graph")
     monkeypatch.setenv("BIGQUERY_INTENT_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_ACTION_ROUTER_LLM_ENABLED", "true")
     monkeypatch.setenv("BIGQUERY_CHAT_PLANNER_ENABLED", "false")

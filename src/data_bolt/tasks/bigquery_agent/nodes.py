@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from typing import Any, cast
 
 from data_bolt.tasks import bigquery as bigquery_tasks
@@ -25,10 +24,6 @@ explain_schema_lookup = bigquery_tasks.explain_schema_lookup
 explain_sql_validation = bigquery_tasks.explain_sql_validation
 
 _CONVERSATION_CLIP_LIMIT = int(os.getenv("BIGQUERY_AGENT_CONVERSATION_CLIP_LIMIT", "20"))
-_BLOCKED_SQL_KEYWORDS = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|REPLACE|GRANT|REVOKE|CALL|EXECUTE|BEGIN|COMMIT|ROLLBACK)\b",
-    re.IGNORECASE,
-)
 
 
 def _env_truthy(value: str | None, default: bool = False) -> bool:
@@ -64,24 +59,6 @@ def _extract_sql_from_generation(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _is_read_only_sql(sql: str) -> tuple[bool, str]:
-    without_block_comments = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
-    normalized = re.sub(r"--[^\n]*", " ", without_block_comments).strip()
-    statements = [part.strip() for part in normalized.split(";") if part.strip()]
-    if not statements:
-        return False, "실행할 SQL이 없습니다."
-    if len(statements) != 1:
-        return False, "다중 statement SQL은 실행할 수 없습니다."
-
-    statement = statements[0]
-    first_token = statement.split(None, 1)[0].upper() if statement.split() else ""
-    if first_token not in {"SELECT", "WITH"}:
-        return False, "읽기 전용 SELECT 쿼리만 실행할 수 있습니다."
-    if _BLOCKED_SQL_KEYWORDS.search(statement):
-        return False, "쓰기/DDL SQL은 실행할 수 없습니다."
-    return True, ""
-
-
 def _format_number(value: Any) -> str:
     try:
         return f"{int(value):,}"
@@ -106,15 +83,6 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return bool(value)
-
-
-def _coerce_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _preview_cell(value: Any, max_len: int = 32) -> str:
@@ -265,7 +233,7 @@ def _route_from_action(action: TurnAction) -> Route:
 
 def _build_routing_meta(state: AgentState) -> dict[str, Any]:
     return {
-        "runtime_mode": state.get("runtime_mode") or "graph",
+        "runtime_mode": state.get("runtime_mode") or "loop",
         "action": state.get("action") or "",
         "confidence": state.get("action_confidence", 0.0),
         "reason": state.get("action_reason") or "",
@@ -288,7 +256,6 @@ def _node_reset_turn_state(state: AgentState) -> AgentState:
         "candidate_sql": None,
         "dry_run": {},
         "generation_result": {},
-        "can_execute": False,
         "execution": {},
         "response_text": "",
         "error": None,
@@ -446,126 +413,6 @@ def _node_chat_reply(state: AgentState) -> AgentState:
     }
 
 
-def _node_schema_lookup(state: AgentState) -> AgentState:
-    text = _coerce_str(state.get("text"))
-    table_info = _coerce_str(state.get("table_info"))
-    glossary_info = _coerce_str(state.get("glossary_info"))
-    history = cast(list[dict[str, Any]], state.get("conversation") or [])
-    try:
-        lookup = explain_schema_lookup(
-            question=text,
-            table_info=table_info,
-            glossary_info=glossary_info,
-            history=history,
-        )
-    except Exception as exc:
-        logger.warning("bigquery_agent.schema_lookup_fallback", extra={"error": str(exc)})
-        lookup = {
-            "response_text": "스키마 정보를 불러오지 못했습니다. 조회하려는 지표/테이블을 구체적으로 알려주세요.",
-            "reference_sql": None,
-            "meta": {},
-        }
-
-    response_text = _coerce_str(lookup.get("response_text"), "").strip()
-    reference_sql_raw = lookup.get("reference_sql")
-    reference_sql = reference_sql_raw.strip() if isinstance(reference_sql_raw, str) else None
-    meta_raw = lookup.get("meta")
-    meta = meta_raw if isinstance(meta_raw, dict) else {}
-
-    return {
-        "route": "data",
-        "candidate_sql": reference_sql,
-        "generation_result": {
-            "answer_structured": {
-                "sql": reference_sql,
-                "explanation": response_text,
-                "instruction_type": "schema_lookup",
-            },
-            "meta": meta,
-        },
-        "response_text": response_text,
-    }
-
-
-def _node_sql_validate_explain(state: AgentState) -> AgentState:
-    text = _coerce_str(state.get("text"))
-    user_sql = state.get("user_sql")
-    last_candidate_sql = _coerce_str(state.get("last_candidate_sql")).strip()
-    last_dry_run_raw = state.get("last_dry_run")
-    last_dry_run = last_dry_run_raw if isinstance(last_dry_run_raw, dict) else {}
-
-    target_sql = _coerce_str(user_sql).strip() if isinstance(user_sql, str) else ""
-    source = "user_sql"
-    if not target_sql and last_candidate_sql:
-        target_sql = last_candidate_sql
-        source = "last_candidate_sql"
-
-    if not target_sql:
-        explanation = "검증/설명할 SQL이 없습니다. SQL 코드 블록을 보내거나 이전에 생성한 쿼리를 지정해주세요."
-        return {
-            "route": "data",
-            "generation_result": {
-                "answer_structured": {
-                    "sql": None,
-                    "explanation": explanation,
-                    "instruction_type": "sql_validate_explain",
-                }
-            },
-            "response_text": explanation,
-        }
-
-    if source == "user_sql":
-        dry_run = dry_run_bigquery_sql(target_sql)
-    elif last_dry_run and "success" in last_dry_run:
-        dry_run = last_dry_run
-    else:
-        dry_run = dry_run_bigquery_sql(target_sql)
-
-    if dry_run.get("success"):
-        validated_sql = _coerce_str(dry_run.get("sql")).strip()
-        if validated_sql:
-            target_sql = validated_sql
-
-    history = cast(list[dict[str, Any]], state.get("conversation") or [])
-    try:
-        explain_result = explain_sql_validation(
-            question=text,
-            sql=target_sql,
-            dry_run=dry_run,
-            history=history,
-        )
-    except Exception as exc:
-        logger.warning("bigquery_agent.sql_validation_explain_fallback", extra={"error": str(exc)})
-        explain_result = {"response_text": ""}
-
-    explanation = _coerce_str(explain_result.get("response_text"), "").strip()
-    if not explanation:
-        if dry_run.get("success"):
-            explanation = (
-                "SQL dry-run 검증을 통과했습니다. 필요하면 비용/필터 조건을 더 점검해드릴게요."
-            )
-        else:
-            explanation = f"SQL dry-run 검증에 실패했습니다. error: {dry_run.get('error', '-')}"
-
-    result: AgentState = {
-        "route": "data",
-        "candidate_sql": target_sql,
-        "dry_run": dry_run,
-        "generation_result": {
-            "answer_structured": {
-                "sql": target_sql,
-                "explanation": explanation,
-                "instruction_type": "sql_validate_explain",
-            }
-        },
-        "response_text": explanation,
-    }
-    if dry_run.get("success"):
-        result["last_candidate_sql"] = target_sql
-        result["last_dry_run"] = dry_run
-    return result
-
-
 def _node_sql_generate(state: AgentState) -> AgentState:
     text = _coerce_str(state.get("text"))
     payload: dict[str, Any] = {
@@ -604,303 +451,6 @@ def _node_sql_generate(state: AgentState) -> AgentState:
         output["last_candidate_sql"] = generated_candidate_sql
         output["last_dry_run"] = dry_run_data
     return output
-
-
-def _node_sql_execute(state: AgentState) -> AgentState:
-    user_sql = state.get("user_sql")
-    pending_execution_sql = _coerce_str(state.get("pending_execution_sql")).strip()
-    pending_dry_run_raw = state.get("pending_execution_dry_run")
-    pending_dry_run = pending_dry_run_raw if isinstance(pending_dry_run_raw, dict) else {}
-    last_candidate_sql = _coerce_str(state.get("last_candidate_sql")).strip()
-    last_dry_run_raw = state.get("last_dry_run")
-    last_dry_run = last_dry_run_raw if isinstance(last_dry_run_raw, dict) else {}
-
-    if isinstance(user_sql, str) and user_sql.strip():
-        sql = user_sql.strip()
-        dry_run = dry_run_bigquery_sql(sql)
-        explanation = "요청에 포함된 SQL을 실행 준비를 위해 검증했습니다."
-    elif pending_execution_sql:
-        sql = pending_execution_sql
-        dry_run = pending_dry_run if pending_dry_run else {}
-        explanation = "승인 대기 중인 SQL을 실행 대상으로 불러왔습니다."
-    elif last_candidate_sql:
-        sql = last_candidate_sql
-        dry_run = last_dry_run if last_dry_run else {}
-        explanation = "이전 턴에서 생성한 SQL을 실행 대상으로 사용합니다."
-    else:
-        return {
-            "route": "data",
-            "candidate_sql": None,
-            "execution": {
-                "success": False,
-                "error": "실행할 SQL이 없습니다. SQL 코드 블록을 제공하거나 이전 쿼리를 생성해주세요.",
-            },
-            "generation_result": {
-                "answer_structured": {
-                    "sql": None,
-                    "explanation": "실행 요청을 처리할 SQL을 찾지 못했습니다.",
-                    "instruction_type": "sql_execute",
-                }
-            },
-        }
-
-    if dry_run.get("success"):
-        normalized_sql = _coerce_str(dry_run.get("sql")).strip()
-        if normalized_sql:
-            sql = normalized_sql
-
-    result: AgentState = {
-        "route": "data",
-        "candidate_sql": sql,
-        "dry_run": dry_run,
-        "generation_result": {
-            "answer_structured": {
-                "sql": sql,
-                "explanation": explanation,
-                "instruction_type": "sql_execute",
-            }
-        },
-    }
-    if dry_run.get("success"):
-        result["last_candidate_sql"] = sql
-        result["last_dry_run"] = dry_run
-    if not dry_run:
-        result["response_text"] = (
-            "실행 전 dry-run 정보가 없습니다. 먼저 SQL 검증을 수행하거나 쿼리를 다시 요청해주세요."
-        )
-    return result
-
-
-def _node_validate_candidate_sql(state: AgentState) -> AgentState:
-    sql = state.get("candidate_sql")
-    if not isinstance(sql, str) or not sql.strip():
-        return {}
-
-    dry_run = state.get("dry_run")
-    if isinstance(dry_run, dict) and "success" in dry_run:
-        if dry_run.get("success"):
-            normalized_sql = _coerce_str(dry_run.get("sql"), sql).strip() or sql
-            return {"last_candidate_sql": normalized_sql, "last_dry_run": dry_run}
-        return {}
-
-    dry_run_result = dry_run_bigquery_sql(sql)
-    if dry_run_result.get("success"):
-        normalized_sql = _coerce_str(dry_run_result.get("sql"), sql).strip() or sql
-        return {
-            "dry_run": dry_run_result,
-            "candidate_sql": normalized_sql,
-            "last_candidate_sql": normalized_sql,
-            "last_dry_run": dry_run_result,
-        }
-    return {"dry_run": dry_run_result}
-
-
-def _node_policy_gate(state: AgentState) -> AgentState:
-    action = state.get("action", "chat_reply")
-    threshold = _get_auto_execute_max_cost_usd()
-
-    approval_confirmed = action == "execution_approve"
-    if action == "execution_cancel":
-        return {
-            "can_execute": False,
-            "execution": {"success": False, "error": "쿼리 실행 요청을 취소했습니다."},
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "blocked",
-            "execution_policy_reason": "execution_cancelled",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": None,
-        }
-
-    if approval_confirmed:
-        pending_sql = _coerce_str(state.get("pending_execution_sql")).strip()
-        if not pending_sql:
-            return {
-                "can_execute": False,
-                "execution": {
-                    "success": False,
-                    "error": "승인할 대기 중인 쿼리가 없습니다. 먼저 실행 요청을 보내주세요.",
-                },
-                "pending_execution_sql": None,
-                "pending_execution_dry_run": {},
-                "execution_policy": "blocked",
-                "execution_policy_reason": "approval_without_pending_sql",
-                "cost_threshold_usd": threshold,
-                "estimated_cost_usd": None,
-            }
-        sql = pending_sql
-        pending_dry_run_raw = state.get("pending_execution_dry_run")
-        pending_dry_run = pending_dry_run_raw if isinstance(pending_dry_run_raw, dict) else {}
-        dry_run_raw = state.get("dry_run")
-        dry_run = dry_run_raw if isinstance(dry_run_raw, dict) else {}
-        if not dry_run and pending_dry_run:
-            dry_run = pending_dry_run
-    elif action in {"sql_generate", "sql_execute"}:
-        sql = _coerce_str(state.get("candidate_sql")).strip()
-        dry_run_raw = state.get("dry_run")
-        dry_run = dry_run_raw if isinstance(dry_run_raw, dict) else {}
-    else:
-        return {
-            "can_execute": False,
-            "execution_policy": "blocked",
-            "execution_policy_reason": "action_not_executable",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": None,
-        }
-
-    if dry_run.get("success"):
-        dry_run_sql = _coerce_str(dry_run.get("sql")).strip()
-        if dry_run_sql:
-            sql = dry_run_sql
-
-    if not sql:
-        execution = state.get("execution") or {}
-        existing_error = execution.get("error")
-        return {
-            "can_execute": False,
-            "execution": {
-                "success": False,
-                "error": existing_error or "실행할 SQL이 없습니다.",
-            },
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "blocked",
-            "execution_policy_reason": "missing_sql",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": None,
-        }
-
-    read_only, reason = _is_read_only_sql(sql)
-    if not read_only:
-        return {
-            "can_execute": False,
-            "execution": {"success": False, "error": reason},
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "blocked",
-            "execution_policy_reason": "not_read_only",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": None,
-        }
-
-    if not dry_run:
-        return {
-            "can_execute": False,
-            "execution": {"success": False, "error": "dry-run 정보가 없어 실행을 보류했습니다."},
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "blocked",
-            "execution_policy_reason": "missing_dry_run",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": None,
-        }
-
-    if not dry_run.get("success", True):
-        return {
-            "can_execute": False,
-            "execution": {"success": False, "error": "dry-run 실패로 실행을 중단했습니다."},
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "blocked",
-            "execution_policy_reason": "dry_run_failed",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": _coerce_float(dry_run.get("estimated_cost_usd")),
-        }
-
-    max_bytes = int(os.getenv("BIGQUERY_MAX_BYTES_BILLED", "0"))
-    bytes_processed = dry_run.get("total_bytes_processed")
-    try:
-        bytes_num = int(bytes_processed) if bytes_processed is not None else 0
-    except (TypeError, ValueError):
-        bytes_num = 0
-
-    if max_bytes > 0 and bytes_num > max_bytes:
-        return {
-            "can_execute": False,
-            "execution": {
-                "success": False,
-                "error": (
-                    f"예상 처리 바이트가 제한을 초과했습니다. bytes={bytes_num}, limit={max_bytes}"
-                ),
-            },
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "blocked",
-            "execution_policy_reason": "max_bytes_exceeded",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": _coerce_float(dry_run.get("estimated_cost_usd")),
-        }
-
-    estimated_cost = _coerce_float(dry_run.get("estimated_cost_usd"))
-
-    if approval_confirmed:
-        return {
-            "can_execute": True,
-            "candidate_sql": sql,
-            "dry_run": dry_run,
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "auto_execute",
-            "execution_policy_reason": "user_approved",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": estimated_cost,
-        }
-
-    if estimated_cost is not None and estimated_cost < threshold:
-        return {
-            "can_execute": True,
-            "candidate_sql": sql,
-            "dry_run": dry_run,
-            "pending_execution_sql": None,
-            "pending_execution_dry_run": {},
-            "execution_policy": "auto_execute",
-            "execution_policy_reason": "cost_below_threshold",
-            "cost_threshold_usd": threshold,
-            "estimated_cost_usd": estimated_cost,
-        }
-
-    if estimated_cost is None:
-        approval_message = (
-            "예상 비용을 계산할 수 없어 실행 전 사용자 승인이 필요합니다. "
-            "위 쿼리와 dry-run 결과를 확인한 뒤 `실행 승인` 또는 `실행 취소`로 답변해주세요."
-        )
-        policy_reason = "estimated_cost_missing"
-    else:
-        approval_message = (
-            "예상 비용이 자동 실행 임계값 이상입니다. "
-            f"(estimated={estimated_cost}, threshold={threshold}) "
-            "위 쿼리와 dry-run 결과를 확인한 뒤 `실행 승인` 또는 `실행 취소`로 답변해주세요."
-        )
-        policy_reason = "cost_above_threshold"
-
-    return {
-        "can_execute": False,
-        "candidate_sql": sql,
-        "dry_run": dry_run,
-        "execution": {
-            "success": False,
-            "error": approval_message,
-        },
-        "pending_execution_sql": sql,
-        "pending_execution_dry_run": dry_run,
-        "execution_policy": "approval_required",
-        "execution_policy_reason": policy_reason,
-        "cost_threshold_usd": threshold,
-        "estimated_cost_usd": estimated_cost,
-    }
-
-
-def _node_execute(state: AgentState) -> AgentState:
-    if not state.get("can_execute"):
-        return {}
-    sql = state.get("candidate_sql")
-    if not sql:
-        return {"execution": {"success": False, "error": "실행할 SQL이 없습니다."}}
-    return {
-        "execution": execute_bigquery_sql(sql),
-        "pending_execution_sql": None,
-        "pending_execution_dry_run": {},
-    }
 
 
 def _build_sql_result_sections(state: AgentState) -> list[str]:
@@ -979,27 +529,3 @@ def _node_compose_response(state: AgentState) -> AgentState:
     conversation = list(state.get("conversation") or [])
     conversation.append({"role": "assistant", "content": response_text})
     return {"response_text": response_text, "conversation": _clip_conversation(conversation)}
-
-
-def _route_relevance(state: AgentState) -> str:
-    return "proceed" if state.get("should_respond") else "stop"
-
-
-def _route_action_node(state: AgentState) -> str:
-    action = state.get("action", "chat_reply")
-    mapping = {
-        "chat_reply": "chat_reply",
-        "schema_lookup": "schema_lookup",
-        "sql_validate_explain": "sql_validate_explain",
-        "sql_generate": "sql_generate",
-        "sql_execute": "sql_execute",
-        "execution_approve": "policy_gate",
-        "execution_cancel": "policy_gate",
-    }
-    return mapping.get(action, "chat_reply")
-
-
-def _route_execution(state: AgentState) -> str:
-    if state.get("can_execute"):
-        return "execute"
-    return "skip"

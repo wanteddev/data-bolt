@@ -12,7 +12,7 @@
 ## 2) 결정사항
 
 1. 라우팅 모델: **Single-Action Router**
-2. 런타임 모델: **Loop 기본 + Graph 롤백**
+2. 런타임 모델: **Loop 단일 런타임**
 3. `schema_lookup`: RAG 설명 + 참고 SQL 허용, 실행 금지
 4. 라우터 실패 시: 규칙 기반 추론으로 회귀하지 않고 안전 채팅 폴백
 
@@ -36,15 +36,10 @@
 
 구현 파일:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/loop_runtime.py`
-- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/graph.py`
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py`
 
-### A. loop 런타임(기본)
-- 단일 `agent_loop` 노드에서 액션 플래닝/툴 호출/응답 조합을 수행한다.
+- `prepare -> agent <-> tools -> finalize` 토폴로지를 사용한다.
 - SQL 실행 허용 판정과 실제 실행은 `guarded_execute_tool`에서 단일 관문으로 집행한다.
-
-### B. graph 런타임(롤백)
-- 기존 다중 노드 그래프 구조를 유지한다.
 
 ## 5) 라우터 프롬프트 계약
 
@@ -72,11 +67,8 @@
 
 ## 6) 실행 정책
 
-loop 기본 구현:
+구현:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/tools.py::GuardedExecuteTool.run`
-
-graph 롤백 구현:
-- `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery_agent/nodes.py::_node_policy_gate`
 
 적용 범위:
 - `sql_generate`, `sql_execute`, `execution_approve`, `execution_cancel`
@@ -96,16 +88,14 @@ graph 롤백 구현:
 ## 7) 자유대화와 도구 사용
 
 - 자유대화 자체는 `chat_reply`에서 처리한다.
-- 하지만 전체 턴 라우팅은 single-action으로 동작하므로, 대화 맥락에서도 필요 시
+- 전체 턴 라우팅은 single-action으로 동작하며, 필요 시
   `schema_lookup` 또는 `sql_validate_explain`을 직접 선택할 수 있다.
-- 즉, “자유 대화 컨텍스트”와 “데이터 워크플로우 도구”가 분리 노드로 공존한다.
 
 ## 8) 서비스 API
 
 - `classify_intent` -> `plan_turn_action`로 대체
 - `plan_free_chat`는 대화 응답 생성 전용
 - `explain_schema_lookup`, `explain_sql_validation` 제공
-- `BIGQUERY_AGENT_RUNTIME_MODE=loop|graph`로 런타임 전환
 
 관련 파일:
 - `/Users/woojing/code/wanted/data-bolt/src/data_bolt/tasks/bigquery/service.py`
@@ -117,8 +107,8 @@ graph 롤백 구현:
 필수 검증:
 1. `schema_lookup`은 실행하지 않는다.
 2. `sql_validate_explain`은 dry-run 설명만 수행하고 실행하지 않는다.
-3. `sql_generate`는 기존 생성/검증/정책 게이트를 유지한다.
-4. `execution_approve/cancel`이 정책 게이트에서 정상 처리된다.
+3. `sql_generate`는 생성/검증/정책 게이트를 유지한다.
+4. `execution_approve/cancel`이 정상 처리된다.
 5. 라우터 실패 시 `chat_reply` 안전 폴백이 동작한다.
 6. ignore 턴은 conversation을 오염시키지 않는다.
 

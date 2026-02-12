@@ -40,7 +40,6 @@ module-root = "src"
 
 [dependency-groups]
 dev = [
-    "boto3-stubs[essential,lambda,ssm]",
     "langgraph-cli[inmem]>=0.4.12",
     "pre-commit>=4.3.0",
     "pyright>=1.1.408",
