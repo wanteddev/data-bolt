@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 
 from data_bolt.botctl.runtime import guard_thread_ts_with_backend, resolve_checkpoint_backend
 from data_bolt.botctl.types import SimulationCase, SimulationRun
-from data_bolt.tasks.bigquery_agent import AgentPayload, AgentState, run_bigquery_agent
+
+type AgentPayload = dict[str, Any]
+type AgentState = dict[str, Any]
 
 DEFAULT_CASES: dict[str, SimulationCase] = {
     "greeting": {"name": "greeting", "text": "안녕하세요"},
@@ -121,8 +123,10 @@ def _run_single(payload: dict[str, Any], via_background: bool) -> SimulationRun:
         background_result = asyncio.run(_run_via_background(payload))
         return {"mode": "background", "payload": payload, "result": background_result}
 
-    direct_result = run_bigquery_agent(cast(AgentPayload, payload))
-    return {"mode": "direct", "payload": payload, "result": cast(dict[str, Any], direct_result)}
+    from data_bolt.tasks.analyst_agent import run_analyst_turn
+
+    direct_result = run_analyst_turn(payload)
+    return {"mode": "direct", "payload": payload, "result": direct_result}
 
 
 def _trace_reason(node: str, state: AgentState) -> str:

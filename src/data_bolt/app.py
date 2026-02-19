@@ -126,11 +126,18 @@ async def handle_slack_background(data: dict[str, Any]) -> dict[str, Any]:
     This endpoint is invoked asynchronously by the main handler
     for long-running tasks that exceed Slack's 3-second timeout.
     """
-    from data_bolt.slack.background import handle_bigquery_sql_bg, process_background_task
+    from data_bolt.slack.background import (
+        handle_bigquery_approval_bg,
+        handle_bigquery_sql_bg,
+        process_background_task,
+    )
 
     if data.get("task_type") in {"bigquery_sql", "build_bigquery"}:
         payload = data.get("payload", {})
         return await handle_bigquery_sql_bg(payload)
+    if data.get("task_type") == "bigquery_approval":
+        payload = data.get("payload", {})
+        return await handle_bigquery_approval_bg(payload)
 
     return await process_background_task(data)
 

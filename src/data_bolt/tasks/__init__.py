@@ -1,9 +1,18 @@
 """Runtime-agnostic task implementations."""
 
-from data_bolt.tasks.bigquery import build_bigquery_sql
-from data_bolt.tasks.bigquery_agent import run_bigquery_agent
+from data_bolt.tasks.analyst_agent import run_analyst_approval, run_analyst_turn
+from data_bolt.tasks.tools import (
+    dry_run_bigquery_sql,
+    estimate_query_cost_usd,
+    execute_bigquery_sql,
+    lookup_schema_rag_context,
+)
 
 __all__ = [
-    "build_bigquery_sql",
-    "run_bigquery_agent",
+    "dry_run_bigquery_sql",
+    "estimate_query_cost_usd",
+    "execute_bigquery_sql",
+    "lookup_schema_rag_context",
+    "run_analyst_approval",
+    "run_analyst_turn",
 ]

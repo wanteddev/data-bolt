@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import boto3
 from anyio import to_thread
@@ -15,10 +15,8 @@ from data_bolt.tasks.relevance import should_respond_to_message
 
 from .app import slack_app
 
-if TYPE_CHECKING:
-    from data_bolt.tasks.bigquery_agent import AgentPayload
-
 logger = logging.getLogger(__name__)
+type AgentPayload = dict[str, Any]
 
 lambda_client = boto3.client("lambda")
 BACKGROUND_FUNCTION_NAME = os.environ.get("SLACK_BG_FUNCTION_NAME", "")
@@ -62,6 +60,45 @@ def _build_bigquery_payload(
         "include_thread_history": True,
     }
     return payload
+
+
+def _extract_action_value(body: dict[str, Any]) -> str:
+    actions = body.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return ""
+    first = actions[0]
+    if not isinstance(first, dict):
+        return ""
+    value = first.get("value")
+    return str(value) if value is not None else ""
+
+
+def _build_approval_payload(body: dict[str, Any], *, approved: bool) -> AgentPayload:
+    team_raw = body.get("team")
+    user_raw = body.get("user")
+    channel_raw = body.get("channel")
+    container_raw = body.get("container")
+    message_raw = body.get("message")
+
+    team = team_raw if isinstance(team_raw, Mapping) else {}
+    user = user_raw if isinstance(user_raw, Mapping) else {}
+    channel = channel_raw if isinstance(channel_raw, Mapping) else {}
+    container = container_raw if isinstance(container_raw, Mapping) else {}
+    message = message_raw if isinstance(message_raw, Mapping) else {}
+
+    channel_id = str(channel.get("id") or container.get("channel_id") or "")
+    message_ts = str(container.get("message_ts") or message.get("ts") or "")
+    thread_ts = str(message.get("thread_ts") or container.get("thread_ts") or message_ts)
+
+    return {
+        "approval_request_id": _extract_action_value(body),
+        "approved": approved,
+        "user_id": str(user.get("id") or ""),
+        "team_id": str(team.get("id") or ""),
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "message_ts": message_ts,
+    }
 
 
 def invoke_background(task_type: str, payload: Mapping[str, Any]) -> None:
@@ -189,3 +226,31 @@ async def handle_message(
             ":x: 요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
             thread_ts=event.get("thread_ts") or event.get("ts"),
         )
+
+
+@slack_app.action("bq_approve_execute")
+async def handle_approve_execute_action(
+    ack: AsyncAck,
+    body: dict[str, Any],
+) -> None:
+    """Handle Slack button action for query execution approval."""
+    await ack()
+    payload = _build_approval_payload(body, approved=True)
+    try:
+        await to_thread.run_sync(invoke_background, "bigquery_approval", payload)
+    except SlackBackgroundError as e:
+        logger.error(f"Approval background task failed: {e}")
+
+
+@slack_app.action("bq_deny_execute")
+async def handle_deny_execute_action(
+    ack: AsyncAck,
+    body: dict[str, Any],
+) -> None:
+    """Handle Slack button action for query execution denial."""
+    await ack()
+    payload = _build_approval_payload(body, approved=False)
+    try:
+        await to_thread.run_sync(invoke_background, "bigquery_approval", payload)
+    except SlackBackgroundError as e:
+        logger.error(f"Denial background task failed: {e}")

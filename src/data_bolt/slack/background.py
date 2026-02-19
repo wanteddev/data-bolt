@@ -6,7 +6,7 @@ import os
 import traceback
 from collections.abc import Callable, Mapping
 from functools import partial
-from typing import Any, ParamSpec, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar
 
 import httpx
 from anyio import to_thread
@@ -119,6 +119,7 @@ async def process_background_task(event: dict[str, Any]) -> dict[str, Any]:
     handlers = {
         "bigquery_sql": handle_bigquery_sql_bg,
         "build_bigquery": handle_bigquery_sql_bg,
+        "bigquery_approval": handle_bigquery_approval_bg,
     }
 
     handler = handlers.get(task_type)
@@ -252,8 +253,6 @@ async def handle_bigquery_sql_bg(payload: dict[str, Any]) -> dict[str, Any]:
     - response_url or channel_id
     - optional thread_ts
     """
-    from data_bolt.tasks.bigquery_agent import AgentPayload, run_bigquery_agent
-
     response_url = payload.get("response_url")
     channel_id = payload.get("channel_id")
     thread_ts = payload.get("thread_ts")
@@ -267,10 +266,14 @@ async def handle_bigquery_sql_bg(payload: dict[str, Any]) -> dict[str, Any]:
         if history:
             payload = {**payload, "history": history}
 
-    typed_payload = cast(AgentPayload, payload)
-    result = await to_thread.run_sync(run_bigquery_agent, typed_payload)
+    from data_bolt.tasks.analyst_agent import run_analyst_turn
+
+    result = await to_thread.run_sync(run_analyst_turn, payload)
     should_send_message = bool(result.get("should_respond")) or bool(response_url)
     message = _format_bigquery_response(result) if should_send_message else ""
+    message_blocks = (
+        result.get("response_blocks") if isinstance(result.get("response_blocks"), list) else None
+    )
 
     try:
         if response_url and should_send_message:
@@ -283,12 +286,14 @@ async def handle_bigquery_sql_bg(payload: dict[str, Any]) -> dict[str, Any]:
                     },
                 )
         elif channel_id and should_send_message:
-            await _run_slack_call(
-                slack_client.chat_postMessage,
-                channel=channel_id,
-                text=message,
-                thread_ts=thread_ts,
-            )
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "text": message,
+                "thread_ts": thread_ts,
+            }
+            if message_blocks:
+                kwargs["blocks"] = message_blocks
+            await _run_slack_call(slack_client.chat_postMessage, **kwargs)
     finally:
         if channel_id and message_ts:
             try:
@@ -303,6 +308,45 @@ async def handle_bigquery_sql_bg(payload: dict[str, Any]) -> dict[str, Any]:
 
     if not result.get("should_respond") and not response_url:
         return {"status": "ignored", "result": result}
+
+    if result.get("error"):
+        return {"status": "error", "message": result.get("error")}
+    return {"status": "ok", "result": result}
+
+
+async def handle_bigquery_approval_bg(payload: dict[str, Any]) -> dict[str, Any]:
+    """Background handler for approval/denial callbacks."""
+    from data_bolt.tasks.analyst_agent import run_analyst_approval
+
+    channel_id = payload.get("channel_id")
+    thread_ts = payload.get("thread_ts")
+    response_url = payload.get("response_url")
+
+    result = await to_thread.run_sync(run_analyst_approval, payload)
+    should_send_message = bool(result.get("should_respond")) or bool(response_url)
+    message = _format_bigquery_response(result) if should_send_message else ""
+    message_blocks = (
+        result.get("response_blocks") if isinstance(result.get("response_blocks"), list) else None
+    )
+
+    if response_url and should_send_message:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                response_url,
+                json={
+                    "response_type": "in_channel",
+                    "text": message,
+                },
+            )
+    elif channel_id and should_send_message:
+        kwargs: dict[str, Any] = {
+            "channel": channel_id,
+            "text": message,
+            "thread_ts": thread_ts,
+        }
+        if message_blocks:
+            kwargs["blocks"] = message_blocks
+        await _run_slack_call(slack_client.chat_postMessage, **kwargs)
 
     if result.get("error"):
         return {"status": "error", "message": result.get("error")}

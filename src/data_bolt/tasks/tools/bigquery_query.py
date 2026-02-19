@@ -1,4 +1,4 @@
-"""BigQuery validation and execution helpers."""
+"""Framework-agnostic BigQuery dry-run and execution helpers."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ _bigquery_client: BigQueryClient | None = None
 def _ensure_trailing_semicolon(sql: str | None) -> str | None:
     if sql is None:
         return None
-    s = sql.rstrip()
-    return s if s.endswith(";") else s + ";"
+    stripped = sql.rstrip()
+    return stripped if stripped.endswith(";") else f"{stripped};"
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -58,9 +58,9 @@ def _get_bigquery_client() -> BigQueryClient:
 
 
 def _get_bigquery_location() -> str | None:
-    value = os.getenv("BIGQUERY_LOCATION")
-    if value and value.strip():
-        return value.strip()
+    location = os.getenv("BIGQUERY_LOCATION")
+    if location and location.strip():
+        return location.strip()
     return None
 
 
@@ -114,11 +114,8 @@ def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
         max_bytes = _get_max_bytes_billed()
         if max_bytes is not None:
             config.maximum_bytes_billed = max_bytes
-        query_job = client.query(
-            sql,
-            job_config=config,
-            location=_get_bigquery_location(),
-        )
+
+        query_job = client.query(sql, job_config=config, location=_get_bigquery_location())
         if query_job.errors:
             first_error = query_job.errors[0] if query_job.errors else {}
             error_text = (
@@ -127,14 +124,15 @@ def _dry_run_sql(sql: str) -> tuple[bool, dict[str, Any]]:
                 else "BigQuery dry-run returned errors"
             )
             return False, {"error": error_text}
+
         return True, {
             "total_bytes_processed": query_job.total_bytes_processed,
             "job_id": query_job.job_id,
             "cache_hit": query_job.cache_hit,
             "error": None,
         }
-    except Exception as e:
-        return False, {"error": _format_bigquery_error(e)}
+    except Exception as exc:
+        return False, {"error": _format_bigquery_error(exc)}
 
 
 def dry_run_bigquery_sql(sql: str) -> dict[str, Any]:
@@ -159,11 +157,8 @@ def execute_bigquery_sql(sql: str) -> dict[str, Any]:
         max_bytes = _get_max_bytes_billed()
         if max_bytes is not None:
             config.maximum_bytes_billed = max_bytes
-        query_job = client.query(
-            sql,
-            job_config=config,
-            location=_get_bigquery_location(),
-        )
+
+        query_job = client.query(sql, job_config=config, location=_get_bigquery_location())
         iterator = query_job.result(timeout=_get_query_timeout_seconds())
         preview_limit = int(os.getenv("BIGQUERY_RESULT_PREVIEW_ROWS", "20"))
         preview_rows: list[dict[str, Any]] = []
@@ -184,10 +179,10 @@ def execute_bigquery_sql(sql: str) -> dict[str, Any]:
             "row_count": row_count,
             "preview_rows": preview_rows,
         }
-    except Exception as e:
+    except Exception as exc:
         return {
             "success": False,
-            "error": _format_bigquery_error(e),
+            "error": _format_bigquery_error(exc),
             "job_id": None,
             "row_count": None,
             "preview_rows": [],
