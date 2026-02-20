@@ -178,6 +178,9 @@ def execute_bigquery_sql(sql: str) -> dict[str, Any]:
             "job_id": query_job.job_id,
             "row_count": row_count,
             "preview_rows": preview_rows,
+            "total_bytes_processed": query_job.total_bytes_processed,
+            "total_bytes_billed": query_job.total_bytes_billed,
+            "actual_cost_usd": estimate_query_cost_usd(query_job.total_bytes_billed),
         }
     except Exception as exc:
         return {

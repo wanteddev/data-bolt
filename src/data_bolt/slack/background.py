@@ -188,28 +188,69 @@ def _extract_sql_from_result(result: Mapping[str, Any]) -> str | None:
 
 
 def _format_validation_summary(validation: dict[str, Any]) -> str | None:
-    if validation.get("success"):
-        bytes_processed = validation.get("total_bytes_processed")
-        estimated_cost = validation.get("estimated_cost_usd")
-        cost_summary = (
-            f" (bytes={bytes_processed}, est_cost_usd={estimated_cost})"
-            if bytes_processed is not None or estimated_cost is not None
-            else ""
+    is_valid = validation.get("is_valid")
+    if not isinstance(is_valid, bool):
+        is_valid = (
+            bool(validation.get("success")) if validation.get("success") is not None else None
         )
+
+    if is_valid is True:
+        metrics: list[str] = []
+        if validation.get("total_bytes_processed") is not None:
+            metrics.append(f"bytes_processed={validation.get('total_bytes_processed')}")
+        if validation.get("total_bytes_billed") is not None:
+            metrics.append(f"bytes_billed={validation.get('total_bytes_billed')}")
+        if validation.get("estimated_cost_usd") is not None:
+            metrics.append(f"est_cost_usd={validation.get('estimated_cost_usd')}")
+        details = f" ({', '.join(metrics)})" if metrics else ""
         if validation.get("refined"):
-            return f":white_check_mark: Dry-run passed after refine.{cost_summary}"
-        return f":white_check_mark: Dry-run passed.{cost_summary}"
+            return f":white_check_mark: Dry-run passed after refine.{details}"
+        return f":white_check_mark: Dry-run passed.{details}"
     if validation.get("error"):
         return f":warning: Dry-run failed: {validation.get('error')}"
     return None
 
 
+def _format_execution_summary(execution: dict[str, Any]) -> str | None:
+    is_success = execution.get("success")
+    if isinstance(is_success, bool) and is_success:
+        preview = execution.get("rows_preview")
+        if not isinstance(preview, list):
+            preview = (
+                execution.get("preview_rows")
+                if isinstance(execution.get("preview_rows"), list)
+                else []
+            )
+        preview_text = json.dumps(preview, ensure_ascii=False, default=str)[:1200]
+        metrics: list[str] = []
+        if execution.get("total_bytes_processed") is not None:
+            metrics.append(f"bytes_processed={execution.get('total_bytes_processed')}")
+        if execution.get("total_bytes_billed") is not None:
+            metrics.append(f"bytes_billed={execution.get('total_bytes_billed')}")
+        if execution.get("estimated_cost_usd") is not None:
+            metrics.append(f"est_cost_usd={execution.get('estimated_cost_usd')}")
+        if execution.get("actual_cost_usd") is not None:
+            metrics.append(f"actual_cost_usd={execution.get('actual_cost_usd')}")
+        metric_line = f"\n{', '.join(metrics)}" if metrics else ""
+        return (
+            ":rocket: Query executed."
+            f"\njob_id={execution.get('job_id')}, row_count={execution.get('row_count')}"
+            f"{metric_line}\npreview={preview_text}"
+        )
+
+    if execution.get("error"):
+        return f":warning: Query execution skipped: {execution.get('error')}"
+    return None
+
+
 def _format_bigquery_response(result: Mapping[str, Any]) -> str:
-    if result.get("response_text"):
-        return str(result["response_text"])
+    parts: list[str] = []
+    response_text = result.get("response_text")
+    if isinstance(response_text, str) and response_text.strip():
+        parts.append(response_text.strip())
 
     if result.get("error"):
-        return f":x: {result['error']}"
+        parts.append(f":x: {result['error']}")
 
     generation_result = result.get("generation_result")
     if not isinstance(generation_result, dict):
@@ -217,28 +258,24 @@ def _format_bigquery_response(result: Mapping[str, Any]) -> str:
 
     sql = _extract_sql_from_result(result)
     explanation = (generation_result.get("answer_structured") or {}).get("explanation")
-    parts: list[str] = []
-    if sql:
-        parts.append(f"```sql\n{sql}\n```")
-    if isinstance(explanation, str) and explanation.strip():
-        parts.append(explanation.strip())
+    if not parts:
+        if sql:
+            parts.append(f"```sql\n{sql}\n```")
+        if isinstance(explanation, str) and explanation.strip():
+            parts.append(explanation.strip())
+
     validation_raw = result.get("validation")
     validation_data = validation_raw if isinstance(validation_raw, dict) else {}
     validation = _format_validation_summary(validation_data)
     if validation:
         parts.append(validation)
-    execution = result.get("execution") if isinstance(result.get("execution"), dict) else {}
-    if execution:
-        if execution.get("success"):
-            preview = execution.get("preview_rows") or []
-            preview_text = json.dumps(preview, ensure_ascii=False, default=str)[:1200]
-            parts.append(
-                ":rocket: Query executed."
-                f"\njob_id={execution.get('job_id')}, row_count={execution.get('row_count')}"
-                f"\npreview={preview_text}"
-            )
-        elif execution.get("error"):
-            parts.append(f":warning: Query execution skipped: {execution.get('error')}")
+
+    execution_raw = result.get("execution")
+    execution = execution_raw if isinstance(execution_raw, dict) else {}
+    execution_summary = _format_execution_summary(execution)
+    if execution_summary:
+        parts.append(execution_summary)
+
     if not parts:
         parts.append("No SQL was generated.")
     return "\n\n".join(parts)
@@ -262,9 +299,22 @@ async def handle_bigquery_sql_bg(payload: dict[str, Any]) -> dict[str, Any]:
 
     include_history = payload.get("include_thread_history", True)
     if include_history and not payload.get("history"):
-        history = await _fetch_thread_history(channel_id, thread_ts, message_ts)
-        if history:
-            payload = {**payload, "history": history}
+        should_fetch_history = True
+        backend = (os.getenv("BIGQUERY_THREAD_MEMORY_BACKEND") or "memory").strip().lower()
+        if backend == "dynamodb":
+            try:
+                from data_bolt.tasks.analyst_agent import has_thread_memory
+
+                has_memory = await to_thread.run_sync(has_thread_memory, payload)
+                should_fetch_history = not has_memory
+            except Exception as e:
+                logger.warning(f"Failed to check thread memory state: {e}")
+                should_fetch_history = True
+
+        if should_fetch_history:
+            history = await _fetch_thread_history(channel_id, thread_ts, message_ts)
+            if history:
+                payload = {**payload, "history": history}
 
     from data_bolt.tasks.analyst_agent import run_analyst_turn
 

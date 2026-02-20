@@ -56,6 +56,8 @@ class QueryResultSummary(BaseModel):
     row_count: int | None = None
     total_bytes_processed: int | None = None
     total_bytes_billed: int | None = None
+    estimated_cost_usd: float | None = None
+    actual_cost_usd: float | None = None
     success: bool = True
     error: str | None = None
 

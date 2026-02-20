@@ -51,29 +51,6 @@ def _extract_text_content(content: Any) -> str:
     return ""
 
 
-def _parse_json_object(text: str) -> dict[str, Any]:
-    if not text.strip():
-        return {}
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-
-    decoder = json.JSONDecoder()
-    for start, ch in enumerate(text):
-        if ch != "{":
-            continue
-        try:
-            parsed, _ = decoder.raw_decode(text[start:])
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
-
-
 def _to_laas_messages(messages: list[ModelMessage]) -> list[dict[str, Any]]:
     payload_messages: list[dict[str, Any]] = []
 
@@ -246,48 +223,6 @@ def _parse_laas_response_to_model_response(data: Any) -> ModelResponse:
             )
 
     content = _extract_text_content(message.get("content"))
-    parsed_json = _parse_json_object(content)
-
-    def _append_tool_call_part_from_json_call(call: dict[str, Any]) -> None:
-        raw_function = call.get("function")
-        function = raw_function if isinstance(raw_function, dict) else {}
-
-        tool_name_raw = function.get("name") or call.get("tool_name") or call.get("name")
-        tool_name = tool_name_raw if isinstance(tool_name_raw, str) else ""
-        if not tool_name:
-            return
-
-        args_candidate = function.get("arguments")
-        if args_candidate is None:
-            args_candidate = call.get("parameters")
-        if args_candidate is None:
-            args_candidate = call.get("args")
-
-        args: str | dict[str, Any]
-        if isinstance(args_candidate, (str, dict)):
-            args = _normalize_tool_args(tool_name, args_candidate)
-        else:
-            args = "{}"
-
-        tool_call_id_raw = call.get("tool_call_id") or call.get("id")
-        tool_call_id = (
-            str(tool_call_id_raw)
-            if isinstance(tool_call_id_raw, (str, int))
-            else f"pyd_ai_tool_call_id__{tool_name}"
-        )
-
-        parts.append(ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id))
-
-    raw_tool_calls = parsed_json.get("tool_calls")
-    if isinstance(raw_tool_calls, list):
-        for call in raw_tool_calls:
-            if not isinstance(call, dict):
-                continue
-            _append_tool_call_part_from_json_call(call)
-
-    raw_tool_call = parsed_json.get("tool_call")
-    if isinstance(raw_tool_call, dict):
-        _append_tool_call_part_from_json_call(raw_tool_call)
 
     if not parts:
         parts.append(TextPart(content=content or ""))
@@ -331,8 +266,8 @@ def _laas_function_model(messages: list[ModelMessage], info: AgentInfo) -> Model
     tool_names = [str(tool["function"]["name"]) for tool in tools]
     laas_bridge_prompt = (
         "json mode is enabled. Always respond with valid JSON only. "
-        "If you need a tool, respond with "
-        '{"tool_call":{"tool_name":"<name>","parameters":{...}}}. '
+        "If you need a tool, call it using standard assistant tool_calls metadata "
+        "(not JSON embedded in content). "
         "When no tool is needed, return JSON matching the expected response schema. "
         f"Available tools: {', '.join(tool_names) if tool_names else 'none'}."
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -40,8 +41,10 @@ class AnalystDeps:
     requester_user_id: str | None = None
     channel_id: str | None = None
     thread_ts: str | None = None
+    current_user_text: str | None = None
 
     last_schema: SchemaContext | None = None
     last_dry_run: DryRunResult | None = None
     last_result: QueryResultSummary | None = None
     last_sql: str | None = None
+    trace_callback: Callable[[str, str], None] | None = None

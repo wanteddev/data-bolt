@@ -63,43 +63,23 @@ def test_parse_laas_response_tool_calls() -> None:
     assert parsed.parts
 
 
-def test_parse_laas_response_tool_calls_from_content_json() -> None:
-    parsed = model_factory._parse_laas_response_to_model_response(
-        {
-            "id": "resp-2",
-            "model": "laas-model",
-            "usage": {"prompt_tokens": 3, "completion_tokens": 5},
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "message": {
-                        "content": (
-                            '{"tool_calls":[{"id":"call-2","type":"function","function":'
-                            '{"name":"bigquery_execute","arguments":"{\\"sql\\":\\"SELECT 1\\"}"}}]}'
-                        )
-                    },
-                }
-            ],
-        }
-    )
-
-    assert parsed.parts
-    first_part = parsed.parts[0]
-    assert isinstance(first_part, ToolCallPart)
-    assert first_part.tool_name == "bigquery_execute"
-    assert first_part.args_as_dict().get("sql") == "SELECT 1"
-
-
 def test_parse_laas_response_normalizes_get_schema_context_args() -> None:
     parsed = model_factory._parse_laas_response_to_model_response(
         {
             "choices": [
                 {
                     "message": {
-                        "content": (
-                            '{"tool_call":{"tool_name":"get_schema_context","parameters":'
-                            '{"query":"가입자 테이블 알려줘","top_k":"5"}}}'
-                        )
+                        "tool_calls": [
+                            {
+                                "id": "call-schema-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_schema_context",
+                                    "arguments": '{"query":"가입자 테이블 알려줘","top_k":"5"}',
+                                },
+                            }
+                        ],
+                        "content": "",
                     }
                 }
             ]

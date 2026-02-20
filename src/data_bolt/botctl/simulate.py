@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -14,8 +15,7 @@ from dotenv import load_dotenv
 from data_bolt.botctl.runtime import guard_thread_ts_with_backend, resolve_checkpoint_backend
 from data_bolt.botctl.types import SimulationCase, SimulationRun
 
-type AgentPayload = dict[str, Any]
-type AgentState = dict[str, Any]
+type TraceCallback = Callable[[str, str], None]
 
 DEFAULT_CASES: dict[str, SimulationCase] = {
     "greeting": {"name": "greeting", "text": "안녕하세요"},
@@ -129,230 +129,69 @@ def _run_single(payload: dict[str, Any], via_background: bool) -> SimulationRun:
     return {"mode": "direct", "payload": payload, "result": direct_result}
 
 
-def _trace_reason(node: str, state: AgentState) -> str:
-    if node == "ingest":
-        text = state.get("text", "")
-        return f"입력 텍스트/히스토리를 conversation으로 정규화했습니다. text='{text[:40]}'"
-    if node == "decide_turn":
-        should_respond = bool(state.get("should_respond"))
-        action = state.get("action") or "-"
-        confidence = state.get("action_confidence")
-        reason = state.get("action_reason") or "-"
-        if not should_respond:
-            return "응답 조건 미충족으로 흐름을 종료합니다."
-        return (
-            f"요청 액션을 '{state.get('action')}'로 선택했습니다. "
-            f"confidence={confidence if confidence is not None else '-'}, reason={reason}"
-        )
-    if node == "route_decision":
-        return f"라우팅 경로를 '{state.get('route')}'로 결정했습니다."
-    if node in {"sql_generate", "sql_execute", "sql_validate_explain", "schema_lookup"}:
-        action = state.get("action")
-        generation_result_raw = state.get("generation_result")
-        generation_result = generation_result_raw if isinstance(generation_result_raw, dict) else {}
-        meta_raw = generation_result.get("meta")
-        meta = meta_raw if isinstance(meta_raw, dict) else {}
-        rag_raw = meta.get("rag")
-        rag = rag_raw if isinstance(rag_raw, dict) else {}
-        if rag.get("attempted"):
-            return (
-                "RAG 스키마/용어집 검색 후 응답 생성을 수행했습니다. "
-                f"schema_docs={rag.get('schema_docs')}, glossary_docs={rag.get('glossary_docs')}"
-            )
-        if action == "sql_validate_explain" and state.get("candidate_sql"):
-            return "요청 내 SQL을 사용해 dry-run/검증 경로를 수행했습니다."
-        if action == "schema_lookup":
-            return "스키마/RAG 기반 설명 및 참고 SQL 생성을 수행했습니다."
-        if action == "sql_execute":
-            return "실행 대상 SQL을 준비했습니다."
-        return "sql 생성 경로를 수행했습니다."
-    if node == "validate_candidate_sql":
-        dry_run = state.get("dry_run") or {}
-        if not state.get("candidate_sql"):
-            return "검증할 SQL이 없어 dry-run 단계를 건너뜁니다."
-        if dry_run.get("success"):
-            return (
-                "BigQuery dry-run 검증을 통과했습니다. "
-                f"bytes={dry_run.get('total_bytes_processed')}, cost={dry_run.get('estimated_cost_usd')}"
-            )
-        return f"BigQuery dry-run 검증이 실패했습니다. error={dry_run.get('error') or '-'}"
-    if node == "execute_sql":
-        execute_result: dict[str, Any] = state.get("execution") or {}
-        success = execute_result.get("success")
-        return (
-            "쿼리 실행을 완료했습니다."
-            if success
-            else "쿼리 실행을 시도했으나 실패/생략되었습니다."
-        )
-    if node == "compose_response":
-        return "최종 Slack 응답 텍스트를 조합했습니다."
-    return "노드 실행 완료"
+def _trace_stdout_callback() -> TraceCallback:
+    def _emit(node: str, reason: str) -> None:
+        typer.echo(f"[trace] {node}: {reason}")
+
+    return _emit
 
 
-def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, str]]:
-    trace: list[dict[str, str]] = [
-        {"node": "ingest", "reason": "입력 텍스트를 수집했습니다."},
-    ]
+def _trace_reason_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_trace = result.get("trace")
+    if not isinstance(raw_trace, list):
+        return []
 
-    if not result.get("should_respond"):
-        trace.append({"node": "decide_turn", "reason": "응답 조건 미충족으로 종료했습니다."})
-        trace.append({"node": "end", "reason": "응답 조건 미충족으로 종료했습니다."})
-        return trace
-
-    routing_raw = result.get("routing")
-    routing = routing_raw if isinstance(routing_raw, dict) else {}
-    action = str(result.get("action") or "unknown")
-    confidence = routing.get("confidence")
-    reason = routing.get("reason")
-    route = routing.get("route")
-    trace.append(
-        {
-            "node": "decide_turn",
-            "reason": (
-                f"요청 액션을 '{action}'로 선택했습니다. "
-                f"confidence={confidence if confidence is not None else '-'}, "
-                f"reason={reason or '-'}"
-            ),
-        }
-    )
-    trace.append(
-        {"node": "route_decision", "reason": f"라우팅 경로를 '{route or '-'}'로 결정했습니다."}
-    )
-
-    generation_result_raw = result.get("generation_result")
-    generation_result = generation_result_raw if isinstance(generation_result_raw, dict) else {}
-    meta_raw = generation_result.get("meta")
-    meta = meta_raw if isinstance(meta_raw, dict) else {}
-    rag_raw = meta.get("rag")
-    rag = rag_raw if isinstance(rag_raw, dict) else {}
-    if rag.get("attempted"):
-        schema_docs = rag.get("schema_docs")
-        glossary_docs = rag.get("glossary_docs")
-        trace.append(
-            {
-                "node": "rag_context_lookup",
-                "reason": (
-                    f"RAG 스키마/용어집 검색을 수행했습니다. "
-                    f"schema_docs={schema_docs}, glossary_docs={glossary_docs}"
-                ),
-            }
-        )
-
-    if route == "data" or result.get("candidate_sql"):
-        action_node = (
-            action
-            if action in {"schema_lookup", "sql_validate_explain", "sql_generate", "sql_execute"}
-            else "chat_reply"
-        )
-        trace.append({"node": action_node, "reason": "액션 노드를 수행했습니다."})
-    llm_raw = meta.get("llm")
-    llm = llm_raw if isinstance(llm_raw, dict) else {}
-    if not llm:
-        laas_raw = meta.get("laas")
-        llm = laas_raw if isinstance(laas_raw, dict) else {}
-    if llm.get("called"):
-        llm_success = bool(llm.get("success"))
-        provider = llm.get("provider") or "laas"
-        if llm_success:
-            model = llm.get("model") or "-"
-            trace.append(
-                {
-                    "node": "laas_completion",
-                    "reason": f"LLM 호출이 성공했습니다. provider={provider}, model={model}",
-                }
-            )
-        else:
-            trace.append(
-                {
-                    "node": "laas_completion",
-                    "reason": (
-                        f"LLM 호출이 실패했습니다. provider={provider}, "
-                        f"error={llm.get('error') or '-'}"
-                    ),
-                }
-            )
-    validation_raw = result.get("validation")
-    validation = validation_raw if isinstance(validation_raw, dict) else {}
-    if result.get("candidate_sql"):
-        if validation.get("success"):
-            trace.append(
-                {
-                    "node": "validate_candidate_sql",
-                    "reason": (
-                        "BigQuery dry-run 검증을 통과했습니다. "
-                        f"bytes={validation.get('total_bytes_processed')}, "
-                        f"cost={validation.get('estimated_cost_usd')}"
-                    ),
-                }
-            )
-        else:
-            attempts = validation.get("attempts")
-            trace.append(
-                {
-                    "node": "validate_candidate_sql",
-                    "reason": (
-                        "BigQuery dry-run 검증이 실패했습니다. "
-                        f"attempts={attempts if attempts is not None else '-'}, "
-                        f"error={validation.get('error') or '-'}"
-                    ),
-                }
-            )
-    executable_actions = {"sql_execute", "execution_approve", "execution_cancel"}
-    if action in executable_actions:
-        trace.append({"node": "guarded_execute", "reason": "실행 정책 점검을 수행했습니다."})
-        execution_raw = result.get("execution")
-        execution: dict[str, Any] = execution_raw if isinstance(execution_raw, dict) else {}
-        if execution.get("success"):
-            trace.append({"node": "execute_sql", "reason": "쿼리 실행을 완료했습니다."})
-        else:
-            trace.append(
-                {"node": "execute_sql", "reason": "쿼리 실행을 시도했으나 실패/생략되었습니다."}
-            )
-    trace.append({"node": "compose_response", "reason": "최종 응답 텍스트를 조합했습니다."})
-    return trace
+    resolved: list[dict[str, Any]] = []
+    for entry in raw_trace:
+        if not isinstance(entry, dict):
+            continue
+        node = str(entry.get("node") or "").strip()
+        reason = str(entry.get("reason") or "").strip()
+        if not node:
+            continue
+        resolved.append({"node": node, "reason": reason or "실행 단계 완료"})
+    return resolved
 
 
 def _run_direct_persistent(payload: dict[str, Any], trace_enabled: bool) -> SimulationRun:
-    run = _run_single(payload, False)
+    printed_live_trace = False
+    run: SimulationRun
+    if trace_enabled:
+        from data_bolt.tasks.analyst_agent import run_analyst_turn
+
+        run = {
+            "mode": "direct",
+            "payload": payload,
+            "result": run_analyst_turn(payload, trace_callback=_trace_stdout_callback()),
+        }
+        printed_live_trace = True
+    else:
+        run = _run_single(payload, False)
     trace = _trace_reason_from_result(run["result"])
     run["trace"] = trace
-    if trace_enabled:
+    if trace_enabled and not printed_live_trace:
         for entry in trace:
             typer.echo(f"[trace] {entry['node']}: {entry['reason']}")
     return run
 
 
-def _build_result_from_state(state: AgentState, backend: str, thread_id: str) -> dict[str, Any]:
-    generation_result = state.get("generation_result") or {}
-    response_text = state.get("response_text") or ""
-    validation = state.get("dry_run") or generation_result.get("validation") or {}
-
-    return {
-        "thread_id": thread_id,
-        "backend": backend,
-        "action": state.get("action"),
-        "should_respond": bool(state.get("should_respond")),
-        "response_text": response_text,
-        "candidate_sql": state.get("candidate_sql"),
-        "validation": validation,
-        "execution": state.get("execution") or {},
-        "generation_result": generation_result,
-        "conversation_turns": len(state.get("conversation") or []),
-        "routing": {
-            "action": state.get("action"),
-            "confidence": state.get("action_confidence"),
-            "reason": state.get("action_reason"),
-            "route": state.get("route"),
-            "fallback_used": bool(state.get("fallback_used")),
-        },
-    }
-
-
 def _run_direct_with_trace(payload: dict[str, Any], trace_enabled: bool) -> SimulationRun:
-    run = _run_single(payload, False)
+    printed_live_trace = False
+    run: SimulationRun
+    if trace_enabled:
+        from data_bolt.tasks.analyst_agent import run_analyst_turn
+
+        run = {
+            "mode": "direct",
+            "payload": payload,
+            "result": run_analyst_turn(payload, trace_callback=_trace_stdout_callback()),
+        }
+        printed_live_trace = True
+    else:
+        run = _run_single(payload, False)
     trace = _trace_reason_from_result(run["result"])
     run["trace"] = trace
-    if trace_enabled:
+    if trace_enabled and not printed_live_trace:
         for entry in trace:
             typer.echo(f"[trace] {entry['node']}: {entry['reason']}")
     return run
@@ -383,7 +222,7 @@ def simulate_command(
     ] = None,
     trace: Annotated[
         bool,
-        typer.Option("--trace/--no-trace", help="Show live graph node trace while running."),
+        typer.Option("--trace/--no-trace", help="Show live runtime trace while running."),
     ] = True,
     as_json: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
     env_file: Annotated[

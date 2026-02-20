@@ -7,7 +7,11 @@ from typing import Any
 
 from pydantic_ai import ApprovalRequired, ModelRetry, RunContext
 
-from data_bolt.tasks.tools import dry_run_bigquery_sql, execute_bigquery_sql
+from data_bolt.tasks.tools import (
+    dry_run_bigquery_sql,
+    estimate_query_cost_usd,
+    execute_bigquery_sql,
+)
 
 from .deps import AnalystDeps
 from .models import DryRunResult, QueryResultSummary, SchemaContext, TableSnippet
@@ -56,18 +60,47 @@ def _is_non_retryable_bq_error(error: str | None) -> bool:
     return any(marker in lowered for marker in non_retryable_markers)
 
 
+def _emit_trace(deps: AnalystDeps, node: str, reason: str) -> None:
+    callback = deps.trace_callback
+    if callback is None:
+        return
+    try:
+        callback(node, reason)
+    except Exception:
+        return
+
+
 def tool_get_schema_context(
     ctx: RunContext[AnalystDeps],
-    question: str,
+    question: str | None = None,
     top_k: int = 6,
 ) -> SchemaContext:
     """Retrieve schema context via existing RAG helper."""
-    context = ctx.deps.schema_retriever.search(question=question, top_k=top_k)
+    resolved_question = str(question or "").strip() or str(ctx.deps.current_user_text or "").strip()
+    if not resolved_question:
+        raise ModelRetry(
+            "Schema search question is missing. Please provide the metric and time range in one sentence."
+        )
+
+    _emit_trace(
+        ctx.deps,
+        "tool.get_schema_context.call",
+        f"스키마 컨텍스트를 조회합니다. question_len={len(resolved_question)}, top_k={top_k}",
+    )
+    context = ctx.deps.schema_retriever.search(question=resolved_question, top_k=top_k)
     if not context.snippets and context.raw_table_info.strip():
         context.snippets = [
             TableSnippet(table="rag_context", description=context.raw_table_info.strip()[:4000])
         ]
     ctx.deps.last_schema = context
+    _emit_trace(
+        ctx.deps,
+        "tool.get_schema_context.result",
+        (
+            "스키마 컨텍스트 조회를 완료했습니다. "
+            f"snippets={len(context.snippets)}, notes={len(context.notes)}"
+        ),
+    )
     return context
 
 
@@ -77,6 +110,11 @@ def tool_bigquery_dry_run(ctx: RunContext[AnalystDeps], sql: str) -> DryRunResul
     if not normalized_sql:
         raise ModelRetry("SQL is empty. Please provide executable BigQuery SQL.")
 
+    _emit_trace(
+        ctx.deps,
+        "tool.bigquery_dry_run.call",
+        f"BigQuery dry-run을 시작합니다. sql_len={len(normalized_sql)}",
+    )
     result = dry_run_bigquery_sql(normalized_sql)
     dry_run = DryRunResult(
         total_bytes_processed=_as_int(result.get("total_bytes_processed")),
@@ -92,6 +130,15 @@ def tool_bigquery_dry_run(ctx: RunContext[AnalystDeps], sql: str) -> DryRunResul
     )
     ctx.deps.last_sql = normalized_sql
     ctx.deps.last_dry_run = dry_run
+    _emit_trace(
+        ctx.deps,
+        "tool.bigquery_dry_run.result",
+        (
+            "BigQuery dry-run 결과를 받았습니다. "
+            f"is_valid={dry_run.is_valid}, bytes={dry_run.total_bytes_processed}, "
+            f"error={dry_run.error or '-'}"
+        ),
+    )
 
     if not dry_run.is_valid:
         error = dry_run.error or "unknown dry-run failure"
@@ -107,6 +154,11 @@ def tool_bigquery_execute(ctx: RunContext[AnalystDeps], sql: str) -> QueryResult
     if not normalized_sql:
         raise ModelRetry("SQL is empty. Please provide SQL to execute.")
 
+    _emit_trace(
+        ctx.deps,
+        "tool.bigquery_execute.call",
+        f"BigQuery execute를 시작합니다. sql_len={len(normalized_sql)}",
+    )
     dry_run = tool_bigquery_dry_run(ctx, normalized_sql)
     if not dry_run.is_valid:
         error = dry_run.error or "unknown dry-run failure"
@@ -115,10 +167,21 @@ def tool_bigquery_execute(ctx: RunContext[AnalystDeps], sql: str) -> QueryResult
                 statement_type=dry_run.statement_type,
                 total_bytes_processed=dry_run.total_bytes_processed,
                 total_bytes_billed=dry_run.total_bytes_billed,
+                estimated_cost_usd=dry_run.estimated_cost_usd,
+                actual_cost_usd=(
+                    estimate_query_cost_usd(dry_run.total_bytes_billed)
+                    if dry_run.total_bytes_billed is not None
+                    else None
+                ),
                 success=False,
                 error=error,
             )
             ctx.deps.last_result = summary
+            _emit_trace(
+                ctx.deps,
+                "tool.bigquery_execute.result",
+                f"실행을 중단했습니다. dry-run 오류={error}",
+            )
             return summary
         raise ModelRetry(f"BigQuery dry-run failed before execute: {error}")
 
@@ -131,6 +194,14 @@ def tool_bigquery_execute(ctx: RunContext[AnalystDeps], sql: str) -> QueryResult
         and (_is_dml_ddl(normalized_sql) or is_non_select_statement)
         and not ctx.tool_call_approved
     ):
+        _emit_trace(
+            ctx.deps,
+            "tool.bigquery_execute.approval_required",
+            (
+                "쓰기/DDL 또는 non-SELECT 쿼리라 승인이 필요합니다. "
+                f"statement_type={dry_run.statement_type or '-'}"
+            ),
+        )
         raise ApprovalRequired(
             metadata={
                 "reason": "dml_ddl_or_non_select",
@@ -151,6 +222,15 @@ def tool_bigquery_execute(ctx: RunContext[AnalystDeps], sql: str) -> QueryResult
             dry_run.total_bytes_processed > policy.max_bytes_without_approval
             and not ctx.tool_call_approved
         ):
+            _emit_trace(
+                ctx.deps,
+                "tool.bigquery_execute.approval_required",
+                (
+                    "예상 스캔 바이트가 임계값을 초과해 승인이 필요합니다. "
+                    f"estimated_bytes={dry_run.total_bytes_processed}, "
+                    f"threshold={policy.max_bytes_without_approval}"
+                ),
+            )
             raise ApprovalRequired(
                 metadata={
                     "reason": "cost",
@@ -167,15 +247,43 @@ def tool_bigquery_execute(ctx: RunContext[AnalystDeps], sql: str) -> QueryResult
     preview_rows_raw = execution.get("preview_rows")
     preview_rows = preview_rows_raw if isinstance(preview_rows_raw, list) else []
 
+    execution_total_bytes_processed = _as_int(execution.get("total_bytes_processed"))
+    execution_total_bytes_billed = _as_int(execution.get("total_bytes_billed"))
+
     summary = QueryResultSummary(
         job_id=(str(execution.get("job_id")) if execution.get("job_id") else None),
         statement_type=(dry_run.statement_type or "SELECT"),
         rows_preview=preview_rows,
         row_count=_as_int(execution.get("row_count")),
-        total_bytes_processed=dry_run.total_bytes_processed,
-        total_bytes_billed=dry_run.total_bytes_billed,
+        total_bytes_processed=(
+            execution_total_bytes_processed
+            if execution_total_bytes_processed is not None
+            else dry_run.total_bytes_processed
+        ),
+        total_bytes_billed=(
+            execution_total_bytes_billed
+            if execution_total_bytes_billed is not None
+            else dry_run.total_bytes_billed
+        ),
+        estimated_cost_usd=dry_run.estimated_cost_usd,
+        actual_cost_usd=_as_float(execution.get("actual_cost_usd")),
         success=True,
         error=None,
     )
     ctx.deps.last_result = summary
+    _emit_trace(
+        ctx.deps,
+        "tool.bigquery_execute.result",
+        (
+            "BigQuery execute를 완료했습니다. "
+            f"success={summary.success}, row_count={summary.row_count}, job_id={summary.job_id or '-'}"
+        ),
+    )
     return summary
+
+
+def register_analyst_tools(agent: Any) -> None:
+    """Register all analyst tools on the given agent instance."""
+    agent.tool(tool_get_schema_context, name="get_schema_context")
+    agent.tool(tool_bigquery_dry_run, name="bigquery_dry_run")
+    agent.tool(tool_bigquery_execute, name="bigquery_execute")

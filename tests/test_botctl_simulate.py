@@ -182,34 +182,21 @@ def test_simulate_allows_thread_ts_on_dynamodb_backend(monkeypatch) -> None:
     assert result.exit_code == 0
 
 
-def test_simulate_persistent_trace_includes_rag_and_laas(monkeypatch) -> None:
+def test_simulate_persistent_trace_uses_runtime_trace_only(monkeypatch) -> None:
     def fake_run_single(payload: dict[str, Any], via_background: bool) -> dict[str, Any]:
         assert via_background is False
         return {
             "mode": "direct",
             "payload": payload,
             "result": {
-                "action": "sql_generate",
+                "action": "reply",
                 "should_respond": True,
                 "candidate_sql": None,
                 "response_text": "ok",
-                "routing": {
-                    "route": "data",
-                    "confidence": 0.9,
-                    "reason": "data request",
-                    "actions": ["sql_generate"],
-                },
-                "generation_result": {
-                    "meta": {
-                        "rag": {"attempted": True, "schema_docs": 12, "glossary_docs": 3},
-                        "llm": {
-                            "provider": "openai_compatible",
-                            "called": True,
-                            "success": True,
-                            "model": "glm-4.7",
-                        },
-                    }
-                },
+                "trace": [
+                    {"node": "run_analyst_turn.ingest", "reason": "입력 처리"},
+                    {"node": "tool.get_schema_context.call", "reason": "스키마 조회"},
+                ],
             },
         }
 
@@ -222,47 +209,23 @@ def test_simulate_persistent_trace_includes_rag_and_laas(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
-    nodes = [entry["node"] for entry in parsed["trace"]]
-    assert "decide_turn" in nodes
-    assert "route_decision" in nodes
-    assert "sql_generate" in nodes
-    assert "rag_context_lookup" in nodes
-    assert "laas_completion" in nodes
+    assert parsed["trace"] == [
+        {"node": "run_analyst_turn.ingest", "reason": "입력 처리"},
+        {"node": "tool.get_schema_context.call", "reason": "스키마 조회"},
+    ]
 
 
-def test_simulate_trace_includes_dry_run_validation_node(monkeypatch) -> None:
+def test_simulate_trace_is_empty_when_runtime_trace_missing(monkeypatch) -> None:
     def fake_run_single(payload: dict[str, Any], via_background: bool) -> dict[str, Any]:
         assert via_background is False
         return {
             "mode": "direct",
             "payload": payload,
             "result": {
-                "action": "sql_generate",
+                "action": "reply",
                 "should_respond": True,
                 "candidate_sql": "SELECT 1;",
-                "routing": {
-                    "runtime_mode": "loop",
-                    "route": "data",
-                    "confidence": 0.9,
-                    "reason": "data request",
-                    "actions": ["sql_generate"],
-                },
-                "validation": {
-                    "success": False,
-                    "attempts": 2,
-                    "error": "Syntax error",
-                },
                 "response_text": "dry-run failed",
-                "generation_result": {
-                    "meta": {
-                        "llm": {
-                            "provider": "openai_compatible",
-                            "called": True,
-                            "success": True,
-                            "model": "glm-4.7",
-                        },
-                    }
-                },
             },
         }
 
@@ -275,6 +238,33 @@ def test_simulate_trace_includes_dry_run_validation_node(monkeypatch) -> None:
 
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
-    nodes = [entry["node"] for entry in parsed["trace"]]
-    assert "validate_candidate_sql" in nodes
-    assert "guarded_execute" not in nodes
+    assert parsed["trace"] == []
+
+
+def test_simulate_prefers_runtime_trace_from_result(monkeypatch) -> None:
+    def fake_run_single(payload: dict[str, Any], via_background: bool) -> dict[str, Any]:
+        assert via_background is False
+        return {
+            "mode": "direct",
+            "payload": payload,
+            "result": {
+                "action": "reply",
+                "should_respond": True,
+                "candidate_sql": None,
+                "response_text": "ok",
+                "trace": [
+                    {"node": "run_analyst_turn.ingest", "reason": "입력 처리"},
+                    {"node": "run_analyst_turn.apply_output", "reason": "출력 변환"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr("data_bolt.botctl.simulate._run_single", fake_run_single)
+    result = runner.invoke(app, ["simulate", "--text", "안녕하세요", "--json"])
+
+    assert result.exit_code == 0
+    parsed = json.loads(result.stdout)
+    assert parsed["trace"] == [
+        {"node": "run_analyst_turn.ingest", "reason": "입력 처리"},
+        {"node": "run_analyst_turn.apply_output", "reason": "출력 변환"},
+    ]

@@ -16,20 +16,29 @@
 - `botctl simulate --direct`는 `run_analyst_turn()`을 직접 호출
 - `botctl simulate --via-background`는 `/slack/background` 경로를 로컬 재현
 - `botctl chat`는 동일한 direct 경로를 반복 호출해 다턴 테스트
+  - 이전 턴의 `user/assistant` 메시지를 프로세스 메모리에 누적해 `payload["history"]`로 전달
+  - trace 출력은 `run_analyst_turn()` 런타임 단계 trace만 사용 (결과 기반 추정/합성 trace 없음)
 
 ## 2) Analyst Agent 런타임
 
 구현:
 - `src/data_bolt/tasks/analyst_agent/service.py`
 - `src/data_bolt/tasks/analyst_agent/tools.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/config.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/output_parsing.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/result_contract.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/thread_context.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/recovery.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/approval_flow.py`
 
 핵심 구성:
-- `run_analyst_turn(payload)`
-- `run_analyst_approval(payload)`
+- `run_analyst_turn(payload)` (`service.py` facade)
+- `run_analyst_approval(payload)` (`service.py` facade)
 - PydanticAI `Agent` + tool 3종
   - `get_schema_context`
   - `bigquery_dry_run`
   - `bigquery_execute`
+- `runtime/*` 모듈에서 출력 파싱/결과 계약/메모리-컴팩션/복구/승인 재개를 분리 처리
 
 정책:
 - `tasks` 내부는 동기 함수만 사용
@@ -70,10 +79,26 @@
 
 ## 5) 히스토리 정책
 
-- 일반 대화 히스토리: Slack thread 메시지를 매 턴 fetch 후 `message_history`로 주입
+- 일반 대화 히스토리:
+  - 1순위: DynamoDB thread memory (`BIGQUERY_THREAD_MEMORY_BACKEND=dynamodb`)
+  - 2순위: Slack thread fetch(`conversations.replies`) fallback
+  - 3순위: payload history (botctl/local)
 - 승인 컨텍스트: DynamoDB에 최소 저장하여 버튼 승인 시 동일 컨텍스트 재개
+- `botctl chat`: 현재 세션 내에서 이전 턴을 로컬 누적하여 `history`로 주입
 
-## 6) LLM Provider
+## 6) Semantic Compaction
+
+- 트리거: `estimated_prompt_tokens + reserve_output_tokens > context_window * trigger_ratio`
+- 기본값:
+  - `BIGQUERY_CONTEXT_WINDOW_TOKENS=128000`
+  - `BIGQUERY_CONTEXT_TRIGGER_RATIO=0.70`
+  - `BIGQUERY_CONTEXT_TARGET_RATIO=0.50`
+  - `BIGQUERY_CONTEXT_KEEP_RECENT_TURNS=8`
+- 방식: `seed turn + summary memory + recent raw turns` 유지, 오래된 raw turn만 의미 요약으로 압축
+- 요약 모델: 메인 모델과 동일 provider/model 사용
+- 실패 정책: `BIGQUERY_CONTEXT_FAIL_OPEN=true`면 요약 실패 시 원문 경로로 계속 진행
+
+## 7) LLM Provider
 
 구현:
 - `src/data_bolt/tasks/analyst_agent/model_factory.py`
@@ -82,13 +107,21 @@
 - `LLM_PROVIDER=openai_compatible` -> OpenAI-compatible provider
 - `LLM_PROVIDER=laas` -> LAAS `/api/preset/v2/chat/completions` FunctionModel adapter
 
-## 7) 변경 시 동기화 대상
+## 8) 변경 시 동기화 대상
 
 아래 파일 변경 시 본 문서를 함께 업데이트합니다.
 - `src/data_bolt/tasks/analyst_agent/service.py`
 - `src/data_bolt/tasks/analyst_agent/tools.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/config.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/output_parsing.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/result_contract.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/thread_context.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/recovery.py`
+- `src/data_bolt/tasks/analyst_agent/runtime/approval_flow.py`
+- `src/data_bolt/tasks/analyst_agent/thread_memory_store.py`
+- `src/data_bolt/tasks/analyst_agent/semantic_compaction.py`
 - `src/data_bolt/slack/background.py`
 - `src/data_bolt/slack/handlers.py`
 
 ---
-Last updated: 2026-02-19
+Last updated: 2026-02-20

@@ -22,6 +22,13 @@ Parameters:
       - postgres
       - dynamodb
     Description: Checkpoint backend for LangGraph runtime
+  BigqueryThreadMemoryBackend:
+    Type: String
+    Default: memory
+    AllowedValues:
+      - memory
+      - dynamodb
+    Description: Thread memory backend for analyst agent
 
 Resources:
   WebFunctionRole:
@@ -72,6 +79,25 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  AgentThreadMemoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-agent-thread-memory"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
   WebFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -93,6 +119,16 @@ Resources:
           LANGGRAPH_CHECKPOINT_BACKEND: !Ref LanggraphCheckpointBackend
           LANGGRAPH_DYNAMODB_TABLE: !Ref LangGraphCheckpointTable
           LANGGRAPH_DYNAMODB_REGION: !Ref AWS::Region
+          BIGQUERY_THREAD_MEMORY_BACKEND: !Ref BigqueryThreadMemoryBackend
+          BIGQUERY_THREAD_MEMORY_DDB_TABLE: !Ref AgentThreadMemoryTable
+          BIGQUERY_CONTEXT_WINDOW_TOKENS: "128000"
+          BIGQUERY_CONTEXT_TRIGGER_RATIO: "0.70"
+          BIGQUERY_CONTEXT_TARGET_RATIO: "0.50"
+          BIGQUERY_CONTEXT_RESERVE_OUTPUT_TOKENS: "4000"
+          BIGQUERY_CONTEXT_KEEP_RECENT_TURNS: "8"
+          BIGQUERY_CONTEXT_MAX_SUMMARY_CHARS: "4000"
+          BIGQUERY_CONTEXT_REBASE_EVERY: "8"
+          BIGQUERY_CONTEXT_FAIL_OPEN: "true"
 
   WebFunctionUrl:
     Type: AWS::Lambda::Url
@@ -137,6 +173,16 @@ Resources:
           LANGGRAPH_CHECKPOINT_BACKEND: !Ref LanggraphCheckpointBackend
           LANGGRAPH_DYNAMODB_TABLE: !Ref LangGraphCheckpointTable
           LANGGRAPH_DYNAMODB_REGION: !Ref AWS::Region
+          BIGQUERY_THREAD_MEMORY_BACKEND: !Ref BigqueryThreadMemoryBackend
+          BIGQUERY_THREAD_MEMORY_DDB_TABLE: !Ref AgentThreadMemoryTable
+          BIGQUERY_CONTEXT_WINDOW_TOKENS: "128000"
+          BIGQUERY_CONTEXT_TRIGGER_RATIO: "0.70"
+          BIGQUERY_CONTEXT_TARGET_RATIO: "0.50"
+          BIGQUERY_CONTEXT_RESERVE_OUTPUT_TOKENS: "4000"
+          BIGQUERY_CONTEXT_KEEP_RECENT_TURNS: "8"
+          BIGQUERY_CONTEXT_MAX_SUMMARY_CHARS: "4000"
+          BIGQUERY_CONTEXT_REBASE_EVERY: "8"
+          BIGQUERY_CONTEXT_FAIL_OPEN: "true"
 
 Outputs:
   WebFunctionUrl:

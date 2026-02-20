@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Annotated
@@ -14,6 +15,18 @@ from data_bolt.botctl.runtime import resolve_checkpoint_backend
 from data_bolt.botctl.simulate import _build_payload, _run_direct_persistent
 
 _EXIT_WORDS = {"exit", "quit", "/exit"}
+_DEFAULT_HISTORY_MAX_TURNS = 8
+
+
+def _history_max_turns() -> int:
+    raw = (os.getenv("BOTCTL_CHAT_HISTORY_MAX_TURNS") or "").strip()
+    if not raw:
+        return _DEFAULT_HISTORY_MAX_TURNS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_HISTORY_MAX_TURNS
+    return value if value > 0 else _DEFAULT_HISTORY_MAX_TURNS
 
 
 def chat_command(
@@ -31,7 +44,7 @@ def chat_command(
     ] = False,
     trace: Annotated[
         bool,
-        typer.Option("--trace/--no-trace", help="Show live graph node trace while running."),
+        typer.Option("--trace/--no-trace", help="Show live runtime trace while running."),
     ] = True,
     as_json: Annotated[bool, typer.Option("--json", help="Print turn results as JSON.")] = False,
     env_file: Annotated[
@@ -51,6 +64,8 @@ def chat_command(
         )
 
     turn = 1
+    history: list[dict[str, str]] = []
+    history_max_turns = _history_max_turns()
     while True:
         try:
             user_text = typer.prompt("you").strip()
@@ -74,6 +89,9 @@ def chat_command(
             thread_followup=thread_followup,
             thread_ts=session_thread_ts,
         )
+        if history:
+            payload["history"] = [dict(item) for item in history]
+
         run = _run_direct_persistent(payload, trace and not as_json)
         result = run["result"]
 
@@ -95,5 +113,14 @@ def chat_command(
         else:
             typer.echo(f"bot [{result.get('action')}]:")
             typer.echo(str(result.get("response_text") or ""))
+
+        history.append({"role": "user", "content": user_text})
+        response_text = str(result.get("response_text") or "").strip()
+        if response_text:
+            history.append({"role": "assistant", "content": response_text})
+        if history_max_turns > 0:
+            max_messages = history_max_turns * 2
+            if len(history) > max_messages:
+                history = history[-max_messages:]
 
         turn += 1
